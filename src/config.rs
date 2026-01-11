@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub session: SessionConfig,
+    #[serde(default)]
+    pub keybindings: KeybindingsConfig,
 }
 
 /// Proxy server configuration
@@ -114,6 +116,100 @@ pub struct SessionConfig {
     pub timeout_minutes: u64,
     #[serde(default = "default_persist_path")]
     pub persist_path: PathBuf,
+}
+
+/// Keybinding action names
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyAction {
+    /// Start a new session
+    NewSession,
+    /// List saved sessions
+    ListSessions,
+    /// Export conversation to markdown
+    Export,
+    /// Copy last response to clipboard
+    CopyResponse,
+    /// Open external editor
+    Editor,
+    /// Show/switch models
+    Models,
+    /// Toggle Build/Plan mode
+    ToggleMode,
+    /// Cancel in-progress response
+    Cancel,
+    /// Show session status
+    Status,
+    /// Show help
+    Help,
+    /// Clear/new conversation
+    Clear,
+    /// Exit the application
+    Exit,
+    /// Undo last exchange
+    Undo,
+    /// Redo last undone exchange
+    Redo,
+    /// Compact conversation
+    Compact,
+    /// No action (disabled keybinding)
+    None,
+}
+
+/// Keybindings configuration
+/// Maps key combinations to actions. Use "none" to disable a keybinding.
+#[derive(Debug, Deserialize, Clone)]
+pub struct KeybindingsConfig {
+    /// Map of key combination strings to action names
+    /// Example: { "ctrl-x n": "new_session", "f2": "models", "tab": "none" }
+    #[serde(flatten)]
+    pub bindings: HashMap<String, KeyAction>,
+}
+
+impl Default for KeybindingsConfig {
+    fn default() -> Self {
+        let mut bindings = HashMap::new();
+        // Default keybindings (Ctrl+X leader key pattern)
+        bindings.insert("ctrl-x n".to_string(), KeyAction::NewSession);
+        bindings.insert("ctrl-x l".to_string(), KeyAction::ListSessions);
+        bindings.insert("ctrl-x x".to_string(), KeyAction::Export);
+        bindings.insert("ctrl-x y".to_string(), KeyAction::CopyResponse);
+        bindings.insert("ctrl-x e".to_string(), KeyAction::Editor);
+        bindings.insert("ctrl-x m".to_string(), KeyAction::Models);
+        bindings.insert("ctrl-x s".to_string(), KeyAction::Status);
+        bindings.insert("ctrl-x h".to_string(), KeyAction::Help);
+        bindings.insert("f2".to_string(), KeyAction::Models);
+        bindings.insert("tab".to_string(), KeyAction::ToggleMode);
+        bindings.insert("escape".to_string(), KeyAction::Cancel);
+        Self { bindings }
+    }
+}
+
+impl KeybindingsConfig {
+    /// Get the action for a key combination
+    pub fn get_action(&self, key: &str) -> Option<&KeyAction> {
+        self.bindings.get(&key.to_lowercase())
+    }
+
+    /// Check if a key is bound (returns None for disabled or unbound keys)
+    pub fn is_bound(&self, key: &str) -> bool {
+        matches!(self.get_action(key), Some(action) if *action != KeyAction::None)
+    }
+
+    /// Get all bindings for a specific action
+    pub fn get_keys_for_action(&self, action: &KeyAction) -> Vec<&String> {
+        self.bindings
+            .iter()
+            .filter(|(_, a)| *a == action)
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    /// Get the action for a key, with default fallback
+    /// Returns the configured action or the default action for that key
+    pub fn get_action_or_default(&self, key: &str) -> KeyAction {
+        self.get_action(key).cloned().unwrap_or(KeyAction::None)
+    }
 }
 
 fn default_timeout_minutes() -> u64 {

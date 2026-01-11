@@ -22,7 +22,10 @@ use tracing::{debug, info, warn};
 use crate::compaction::{CompactionConfig, ContextCompactor};
 use crate::config::{AppConfig, ProviderConfig};
 use crate::context::ContextInjector;
-use crate::hooks::{HookEngine, HookError, HookEvent, HookInput, HookResult};
+use crate::hooks::{
+    load_claude_code_hooks, merge_hooks_config, HookEngine, HookError, HookEvent, HookInput,
+    HookResult,
+};
 use crate::mcp::McpManager;
 use crate::plugins::PluginManager;
 use crate::providers::get_adapter;
@@ -773,7 +776,11 @@ pub async fn start_server(config: AppConfig) -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
-    let hook_engine = HookEngine::new(config.hooks.clone());
+    // Load hooks from both OpenClaudia config and Claude Code settings.json
+    let claude_hooks = load_claude_code_hooks();
+    let merged_hooks = merge_hooks_config(config.hooks.clone(), claude_hooks);
+    let hook_engine = HookEngine::new(merged_hooks);
+
     let rules_engine = RulesEngine::new(".openclaudia/rules");
 
     // Initialize compactor with default model context

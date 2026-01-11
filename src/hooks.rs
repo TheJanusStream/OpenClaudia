@@ -4,6 +4,9 @@
 //! - Command hooks: Execute shell commands with JSON stdin/stdout
 //! - Prompt hooks: Inject prompts into the conversation
 //!
+//! Also supports loading hooks from Claude Code's .claude/settings.json
+//! for compatibility with existing Claude Code hook configurations.
+//!
 //! Exit codes:
 //! - 0: Success (allow)
 //! - 2: Block the action
@@ -13,6 +16,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use thiserror::Error;
@@ -68,6 +73,186 @@ impl HookEvent {
             HookEvent::PermissionRequest => "permission_request",
             HookEvent::Notification => "notification",
         }
+    }
+
+    /// Parse from Claude Code's PascalCase event name
+    pub fn from_claude_code_name(name: &str) -> Option<Self> {
+        match name {
+            "PreToolUse" => Some(HookEvent::PreToolUse),
+            "PostToolUse" => Some(HookEvent::PostToolUse),
+            "PostToolUseFailure" => Some(HookEvent::PostToolUseFailure),
+            "UserPromptSubmit" => Some(HookEvent::UserPromptSubmit),
+            "Stop" => Some(HookEvent::Stop),
+            "SubagentStart" => Some(HookEvent::SubagentStart),
+            "SubagentStop" => Some(HookEvent::SubagentStop),
+            "PreCompact" => Some(HookEvent::PreCompact),
+            "Notification" => Some(HookEvent::Notification),
+            // Claude Code doesn't have these but we support them
+            "SessionStart" => Some(HookEvent::SessionStart),
+            "SessionEnd" => Some(HookEvent::SessionEnd),
+            "PermissionRequest" => Some(HookEvent::PermissionRequest),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Claude Code Compatibility Layer
+// ============================================================================
+
+/// Claude Code settings.json structure
+#[derive(Debug, Deserialize, Default)]
+pub struct ClaudeCodeSettings {
+    #[serde(default)]
+    pub hooks: HashMap<String, Vec<ClaudeCodeHookEntry>>,
+}
+
+/// Claude Code hook entry format
+#[derive(Debug, Deserialize)]
+pub struct ClaudeCodeHookEntry {
+    #[serde(default)]
+    pub matcher: Option<String>,
+    #[serde(default)]
+    pub hooks: Vec<ClaudeCodeHook>,
+}
+
+/// Claude Code hook definition
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum ClaudeCodeHook {
+    #[serde(rename = "command")]
+    Command {
+        command: String,
+        #[serde(default = "default_claude_timeout")]
+        timeout: Option<u64>,
+    },
+}
+
+fn default_claude_timeout() -> Option<u64> {
+    Some(60)
+}
+
+/// Load hooks from Claude Code's .claude/settings.json
+///
+/// Looks for settings.json in:
+/// 1. .claude/settings.json (project-level)
+/// 2. ~/.claude/settings.json (user-level, lower priority)
+///
+/// Returns merged HooksConfig with Claude Code hooks converted to OpenClaudia format
+pub fn load_claude_code_hooks() -> HooksConfig {
+    let mut config = HooksConfig::default();
+
+    // Check project-level first
+    let project_settings = Path::new(".claude/settings.json");
+    if project_settings.exists() {
+        if let Some(settings) = load_claude_settings_file(project_settings) {
+            merge_claude_hooks(&mut config, &settings);
+            info!(path = ?project_settings, "Loaded Claude Code hooks from project");
+        }
+    }
+
+    // Then check user-level (only if no project-level)
+    if config.is_empty() {
+        if let Some(home) = dirs::home_dir() {
+            let user_settings = home.join(".claude/settings.json");
+            if user_settings.exists() {
+                if let Some(settings) = load_claude_settings_file(&user_settings) {
+                    merge_claude_hooks(&mut config, &settings);
+                    info!(path = ?user_settings, "Loaded Claude Code hooks from user directory");
+                }
+            }
+        }
+    }
+
+    config
+}
+
+/// Load and parse a Claude Code settings.json file
+fn load_claude_settings_file(path: &Path) -> Option<ClaudeCodeSettings> {
+    match fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str::<ClaudeCodeSettings>(&content) {
+            Ok(settings) => Some(settings),
+            Err(e) => {
+                warn!(path = ?path, error = %e, "Failed to parse Claude Code settings");
+                None
+            }
+        },
+        Err(e) => {
+            debug!(path = ?path, error = %e, "Could not read Claude Code settings");
+            None
+        }
+    }
+}
+
+/// Merge Claude Code hooks into OpenClaudia HooksConfig
+fn merge_claude_hooks(config: &mut HooksConfig, settings: &ClaudeCodeSettings) {
+    for (event_name, entries) in &settings.hooks {
+        let Some(event) = HookEvent::from_claude_code_name(event_name) else {
+            warn!(event = %event_name, "Unknown Claude Code hook event, skipping");
+            continue;
+        };
+
+        // Convert Claude Code entries to OpenClaudia format
+        let converted_entries: Vec<HookEntry> = entries
+            .iter()
+            .map(|entry| {
+                let hooks: Vec<Hook> = entry
+                    .hooks
+                    .iter()
+                    .map(|h| match h {
+                        ClaudeCodeHook::Command { command, timeout } => Hook::Command {
+                            command: command.clone(),
+                            timeout: timeout.unwrap_or(60),
+                        },
+                    })
+                    .collect();
+
+                HookEntry {
+                    matcher: entry.matcher.clone().filter(|m| !m.is_empty()),
+                    hooks,
+                }
+            })
+            .collect();
+
+        // Append to the appropriate event list
+        match event {
+            HookEvent::SessionStart => config.session_start.extend(converted_entries),
+            HookEvent::SessionEnd => config.session_end.extend(converted_entries),
+            HookEvent::PreToolUse => config.pre_tool_use.extend(converted_entries),
+            HookEvent::PostToolUse => config.post_tool_use.extend(converted_entries),
+            HookEvent::UserPromptSubmit => config.user_prompt_submit.extend(converted_entries),
+            HookEvent::Stop => config.stop.extend(converted_entries),
+            // Other events not yet supported in HooksConfig
+            _ => {
+                debug!(event = ?event, "Event not yet supported in config, skipping");
+            }
+        }
+    }
+}
+
+/// Merge two HooksConfig structs, with `other` taking precedence
+pub fn merge_hooks_config(base: HooksConfig, other: HooksConfig) -> HooksConfig {
+    let mut merged = base;
+
+    merged.session_start.extend(other.session_start);
+    merged.session_end.extend(other.session_end);
+    merged.pre_tool_use.extend(other.pre_tool_use);
+    merged.post_tool_use.extend(other.post_tool_use);
+    merged.user_prompt_submit.extend(other.user_prompt_submit);
+    merged.stop.extend(other.stop);
+
+    merged
+}
+
+impl HooksConfig {
+    /// Check if the hooks config is empty (no hooks defined)
+    pub fn is_empty(&self) -> bool {
+        self.session_start.is_empty()
+            && self.session_end.is_empty()
+            && self.pre_tool_use.is_empty()
+            && self.post_tool_use.is_empty()
+            && self.user_prompt_submit.is_empty()
+            && self.stop.is_empty()
     }
 }
 
@@ -533,5 +718,191 @@ mod tests {
 
         assert!(result.allowed);
         assert!(result.outputs.is_empty());
+    }
+
+    // ========================================================================
+    // Claude Code Compatibility Tests
+    // ========================================================================
+
+    #[test]
+    fn test_hook_event_from_claude_code_name() {
+        // Test all Claude Code event names
+        assert_eq!(
+            HookEvent::from_claude_code_name("PreToolUse"),
+            Some(HookEvent::PreToolUse)
+        );
+        assert_eq!(
+            HookEvent::from_claude_code_name("PostToolUse"),
+            Some(HookEvent::PostToolUse)
+        );
+        assert_eq!(
+            HookEvent::from_claude_code_name("UserPromptSubmit"),
+            Some(HookEvent::UserPromptSubmit)
+        );
+        assert_eq!(
+            HookEvent::from_claude_code_name("PreCompact"),
+            Some(HookEvent::PreCompact)
+        );
+        assert_eq!(
+            HookEvent::from_claude_code_name("Stop"),
+            Some(HookEvent::Stop)
+        );
+        assert_eq!(
+            HookEvent::from_claude_code_name("SubagentStart"),
+            Some(HookEvent::SubagentStart)
+        );
+
+        // Unknown events should return None
+        assert_eq!(HookEvent::from_claude_code_name("UnknownEvent"), None);
+        assert_eq!(HookEvent::from_claude_code_name(""), None);
+    }
+
+    #[test]
+    fn test_parse_claude_code_settings() {
+        let json = r#"{
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Write|Edit",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python validate.py"
+                            }
+                        ]
+                    }
+                ],
+                "PreCompact": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "bd prime",
+                                "timeout": 30
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let settings: ClaudeCodeSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.hooks.len(), 2);
+        assert!(settings.hooks.contains_key("PreToolUse"));
+        assert!(settings.hooks.contains_key("PreCompact"));
+
+        // Check PreToolUse entry
+        let pre_tool = &settings.hooks["PreToolUse"][0];
+        assert_eq!(pre_tool.matcher, Some("Write|Edit".to_string()));
+        assert_eq!(pre_tool.hooks.len(), 1);
+
+        // Check PreCompact entry has no matcher (empty string is treated as None)
+        let pre_compact = &settings.hooks["PreCompact"][0];
+        assert!(pre_compact.matcher.is_none() || pre_compact.matcher.as_deref() == Some(""));
+    }
+
+    #[test]
+    fn test_merge_claude_hooks() {
+        let json = r#"{
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Write",
+                        "hooks": [
+                            {"type": "command", "command": "echo test"}
+                        ]
+                    }
+                ],
+                "UserPromptSubmit": [
+                    {
+                        "hooks": [
+                            {"type": "command", "command": "python guard.py"}
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let settings: ClaudeCodeSettings = serde_json::from_str(json).unwrap();
+        let mut config = HooksConfig::default();
+        merge_claude_hooks(&mut config, &settings);
+
+        // Should have hooks in the appropriate event lists
+        assert_eq!(config.pre_tool_use.len(), 1);
+        assert_eq!(config.user_prompt_submit.len(), 1);
+
+        // Check the converted hook
+        let entry = &config.pre_tool_use[0];
+        assert_eq!(entry.matcher, Some("Write".to_string()));
+        assert_eq!(entry.hooks.len(), 1);
+
+        match &entry.hooks[0] {
+            Hook::Command { command, timeout } => {
+                assert_eq!(command, "echo test");
+                assert_eq!(*timeout, 60); // default timeout
+            }
+            _ => panic!("Expected Command hook"),
+        }
+    }
+
+    #[test]
+    fn test_hooks_config_is_empty() {
+        let empty = HooksConfig::default();
+        assert!(empty.is_empty());
+
+        let mut non_empty = HooksConfig::default();
+        non_empty.pre_tool_use.push(HookEntry {
+            matcher: None,
+            hooks: vec![],
+        });
+        assert!(!non_empty.is_empty());
+    }
+
+    #[test]
+    fn test_merge_hooks_config() {
+        let mut base = HooksConfig::default();
+        base.pre_tool_use.push(HookEntry {
+            matcher: Some("Read".to_string()),
+            hooks: vec![],
+        });
+
+        let mut other = HooksConfig::default();
+        other.pre_tool_use.push(HookEntry {
+            matcher: Some("Write".to_string()),
+            hooks: vec![],
+        });
+        other.user_prompt_submit.push(HookEntry {
+            matcher: None,
+            hooks: vec![],
+        });
+
+        let merged = merge_hooks_config(base, other);
+
+        // Should have entries from both configs
+        assert_eq!(merged.pre_tool_use.len(), 2);
+        assert_eq!(merged.user_prompt_submit.len(), 1);
+    }
+
+    #[test]
+    fn test_empty_matcher_filtered() {
+        let json = r#"{
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {"type": "command", "command": "echo test"}
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let settings: ClaudeCodeSettings = serde_json::from_str(json).unwrap();
+        let mut config = HooksConfig::default();
+        merge_claude_hooks(&mut config, &settings);
+
+        // Empty matcher should be converted to None (matches all)
+        assert_eq!(config.pre_tool_use[0].matcher, None);
     }
 }

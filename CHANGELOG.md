@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Add robust interactive CLI with slash commands, session management, and TUI improvements (#27)
+- Integrate all dead code modules into OpenClaudia proxy and CLI (#14)
+- Add Claude Code hook compatibility for .claude/hooks directory (#26)
 - Add interactive CLI chat interface for terminal conversations (#25)
 - Add DeepSeek and Qwen provider support with OpenAI-compatible API
 - Add Z.AI/GLM provider to default generated config.yaml (#23)
@@ -24,3 +27,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- Add keyboard shortcut handling to use configured keybindings (#52)
+- Integrate PluginManager for plugin discovery and loading (#18)
+- Integrate McpManager for external tool server support (#17)
+- Integrate ProviderAdapters for multi-provider request transformation (#16)
+- Integrate SessionManager into proxy state tracking (#19)
+- Integrate ContextCompactor into proxy request flow (#15)
+- Add /debug command to show configuration paths, environment, and internal state
+- Add /version command to show version and system information
+- Add #comment syntax to save notes without sending to AI
+- Add /rename command to rename session titles
+- Expand tips system with 30 helpful hints covering all features
+- Add configurable keybindings system (#47)
+- Add agent mode switching with Tab key (Build vs Plan modes) (#38)
+- Add interactive permission prompts for sensitive operations (allow/deny/always) (#41)
+- Add /theme command for switching color themes (#43)
+- Add /connect command for interactive API key configuration (#40)
+- Add status bar showing model, session, and token count (#42)
+- Add /review command to review uncommitted changes or PRs (#51)
+- Add /init command to auto-generate project rules from codebase (#50)
+- Add tips system showing helpful hints on startup (#44)
+- Add clipboard integration to copy last response (Ctrl+X Y) (#45)
+- Add context compaction for long-running sessions (#13)
+- Add CLI with init, start, and loop commands (#11)
+- Add /undo and /redo commands for conversation history (#30)
+- Add external editor support with Ctrl+X E or /editor command (#37)
+- Add /models command and F2 key for model switching (#39)
+- Add Escape key to cancel in-progress responses (#49)
+- Add /models command for listing and switching models (#39)
+- Add /undo and /redo commands for message history (#30)
+- Add Escape key to cancel AI responses mid-stream (#49)
+- Add /editor command for external editor support (#37)
+- Add @filename syntax for fuzzy file attachment in prompts (#33)
+- Add /compact command to summarize long sessions (#31)
+- Add multiline input support with Shift+Enter or Ctrl+J (#36)
+- Add /export command to save conversation as Markdown (#32)
+- Add !command syntax for direct shell execution from chat (#34)
+- Add /sessions command to list and continue previous sessions (#29)
+- Add streaming response display with real-time token output (#46)
+- Add slash command system with /help, /new, /clear, /exit commands (#28)
+- Add spinner and progress indicators during API calls (#48)
+- Add command history navigation with arrow keys (#35)

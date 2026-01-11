@@ -54,6 +54,12 @@ dirs = "6"
 # Regex for hook matchers
 regex = "1"
 
+# CLI enhancements
+rustyline = { version = "14", features = ["derive"] }
+indicatif = "0.17"
+crossterm = "0.28"
+arboard = "3"
+
 [dev-dependencies]
 tempfile = "3"
 
