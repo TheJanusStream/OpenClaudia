@@ -27,11 +27,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add hook engine with all 12 event types (#4)
 
 ### Fixed
+- Fix bash tool to use PowerShell on Windows for better command compatibility (#70)
+- Fix tool use not working with zai/GLM provider (#63)
 - Fix truncated tips text in TUI welcome screen (#61)
 - Fix TUI box rendering using ASCII-compatible characters (#60)
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Improve tool execution loop to use all ToolCallAccumulator methods (#69)
+- Implement tool execution loop (#67)
+- Parse tool_calls from streaming response (#66)
+- Add tools field to chat request body (#65)
+- Define tool schemas for Bash, Read, Write, and Edit (#64)
+- Run comprehensive CLI command tests (#62)
 - Integrate TUI input prompt hints into chat interface (#58)
 - Add styled input area with shortcuts hints (#56)
 - Add two-column welcome layout with tips and recent activity (#55)

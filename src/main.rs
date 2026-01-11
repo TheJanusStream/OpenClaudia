@@ -12,6 +12,7 @@ mod providers;
 mod proxy;
 mod rules;
 mod session;
+mod tools;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -2056,12 +2057,13 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
                     }
                 }
 
-                // Build request with streaming enabled
+                // Build request with streaming enabled and tools
                 let request_body = serde_json::json!({
                     "model": model,
                     "messages": chat_session.messages,
                     "max_tokens": 4096,
-                    "stream": true
+                    "stream": true,
+                    "tools": tools::get_tool_definitions()
                 });
 
                 // Get endpoint and headers
@@ -2100,6 +2102,7 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
                             let mut buffer = String::new();
                             let mut cancelled = false;
                             let mut pending_action: Option<SlashCommandResult> = None;
+                            let mut tool_accumulator = tools::ToolCallAccumulator::new();
 
                             while let Some(chunk_result) = stream.next().await {
                                 // Check for configured keybindings during streaming
@@ -2152,16 +2155,19 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
                                                 // Parse JSON and extract delta content
                                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                                                     // OpenAI format: choices[0].delta.content
-                                                    if let Some(content) = json
+                                                    if let Some(delta) = json
                                                         .get("choices")
                                                         .and_then(|c| c.get(0))
                                                         .and_then(|c| c.get("delta"))
-                                                        .and_then(|d| d.get("content"))
-                                                        .and_then(|c| c.as_str())
                                                     {
-                                                        print!("{}", content);
-                                                        std::io::stdout().flush().ok();
-                                                        full_content.push_str(content);
+                                                        // Handle text content
+                                                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                                            print!("{}", content);
+                                                            std::io::stdout().flush().ok();
+                                                            full_content.push_str(content);
+                                                        }
+                                                        // Accumulate tool calls
+                                                        tool_accumulator.process_delta(delta);
                                                     }
                                                 }
                                             }
@@ -2174,26 +2180,152 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
                                 }
                             }
 
-                            println!("\n");
+                            println!();
 
                             // If cancelled, append note to content
                             if cancelled && !full_content.is_empty() {
                                 full_content.push_str("\n\n[Response interrupted by user]");
                             }
 
-                            if !full_content.is_empty() {
-                                // Add assistant message to history
+                            // Agentic loop - continue while there are tool calls
+                            let max_iterations = 10; // Prevent infinite loops
+                            let mut iteration = 0;
+                            let mut current_content = full_content;
+
+                            while tool_accumulator.has_tool_calls() && !cancelled && iteration < max_iterations {
+                                iteration += 1;
+                                let tool_calls = tool_accumulator.finalize();
+
+                                // Add assistant message with tool calls
+                                let tool_calls_json: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
+                                    serde_json::json!({
+                                        "id": tc.id,
+                                        "type": tc.call_type,
+                                        "function": {
+                                            "name": tc.function.name,
+                                            "arguments": tc.function.arguments
+                                        }
+                                    })
+                                }).collect();
+
                                 chat_session.messages.push(serde_json::json!({
                                     "role": "assistant",
-                                    "content": full_content
+                                    "content": if current_content.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(current_content.clone()) },
+                                    "tool_calls": tool_calls_json
+                                }));
+
+                                // Execute each tool and collect results
+                                for tool_call in &tool_calls {
+                                    println!("\n\x1b[36m⚡ Running {}...\x1b[0m", tool_call.function.name);
+
+                                    let result = tools::execute_tool(tool_call);
+
+                                    // Show result preview
+                                    let preview: String = result.content.lines().take(5).collect::<Vec<_>>().join("\n");
+                                    if result.is_error {
+                                        println!("\x1b[31m✗ Error:\x1b[0m {}", preview);
+                                    } else {
+                                        println!("\x1b[32m✓\x1b[0m {}", if preview.len() > 200 { format!("{}...", &preview[..200]) } else { preview });
+                                    }
+
+                                    // Add tool result to messages
+                                    chat_session.messages.push(serde_json::json!({
+                                        "role": "tool",
+                                        "tool_call_id": result.tool_call_id,
+                                        "content": result.content
+                                    }));
+                                }
+
+                                // Clear accumulator for next iteration
+                                tool_accumulator.clear();
+
+                                // Continue the conversation - send tool results back to model
+                                println!("\n\x1b[90mContinuing with tool results...\x1b[0m\n");
+
+                                // Build new request with tool results
+                                let request_body = serde_json::json!({
+                                    "model": model,
+                                    "messages": chat_session.messages,
+                                    "max_tokens": 4096,
+                                    "stream": true,
+                                    "tools": tools::get_tool_definitions()
+                                });
+
+                                // Send follow-up request
+                                let mut req = client.post(&endpoint).json(&request_body);
+                                for (key, value) in &headers {
+                                    req = req.header(key, value);
+                                }
+
+                                current_content = String::new();
+
+                                if let Ok(response) = req.send().await {
+                                    if response.status().is_success() {
+                                        let mut stream = response.bytes_stream();
+                                        let mut buffer = String::new();
+
+                                        while let Some(chunk_result) = stream.next().await {
+                                            if let Ok(chunk) = chunk_result {
+                                                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                                                while let Some(line_end) = buffer.find('\n') {
+                                                    let line = buffer[..line_end].trim().to_string();
+                                                    buffer = buffer[line_end + 1..].to_string();
+
+                                                    if line.is_empty() || line.starts_with(':') {
+                                                        continue;
+                                                    }
+
+                                                    if let Some(data) = line.strip_prefix("data: ") {
+                                                        if data == "[DONE]" {
+                                                            break;
+                                                        }
+
+                                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                                            if let Some(delta) = json
+                                                                .get("choices")
+                                                                .and_then(|c| c.get(0))
+                                                                .and_then(|c| c.get("delta"))
+                                                            {
+                                                                // Handle text content
+                                                                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                                                    print!("{}", content);
+                                                                    std::io::stdout().flush().ok();
+                                                                    current_content.push_str(content);
+                                                                }
+                                                                // Accumulate tool calls for next iteration
+                                                                tool_accumulator.process_delta(delta);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        println!();
+                                    }
+                                }
+                            }
+
+                            // Save final response
+                            if !current_content.is_empty() && !tool_accumulator.has_tool_calls() {
+                                // Add final assistant message (text response after tool loop or direct response)
+                                chat_session.messages.push(serde_json::json!({
+                                    "role": "assistant",
+                                    "content": current_content
                                 }));
                                 chat_session.touch();
-                                // Save session after successful exchange
                                 if let Err(e) = save_chat_session(&chat_session) {
                                     tracing::warn!("Failed to save session: {}", e);
                                 }
-                            } else {
-                                // Remove the failed user message if no content received
+                            } else if iteration > 0 {
+                                // Tool loop completed but no final text - still save session
+                                chat_session.touch();
+                                if let Err(e) = save_chat_session(&chat_session) {
+                                    tracing::warn!("Failed to save session: {}", e);
+                                }
+                            } else if current_content.is_empty() && !tool_accumulator.has_tool_calls() {
+                                // No content and no tool calls - remove the failed user message
                                 chat_session.messages.pop();
                             }
 
