@@ -12,6 +12,7 @@ mod providers;
 mod proxy;
 mod rules;
 mod session;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -1772,10 +1773,21 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
     // Load history (ignore errors if file doesn't exist)
     let _ = rl.load_history(&history_path);
 
-    println!("OpenClaudia v{}", env!("CARGO_PKG_VERSION"));
-    println!("Provider: {} | Model: {}", config.proxy.target, model);
-    println!("Type /help for commands, /sessions to list saved chats");
-    println!("Tip: {}\n", get_random_tip());
+    // Clear screen and render TUI welcome screen
+    let _ = tui::clear_screen();
+    let welcome = tui::WelcomeScreen::new(
+        env!("CARGO_PKG_VERSION"),
+        &config.proxy.target,
+        &model,
+    );
+    if let Err(e) = welcome.render() {
+        // Fallback to simple output if TUI fails
+        eprintln!("TUI render failed: {}, using simple output", e);
+        println!("OpenClaudia v{}", env!("CARGO_PKG_VERSION"));
+        println!("Provider: {} | Model: {}", config.proxy.target, model);
+        println!("Type /help for commands, /sessions to list saved chats");
+        println!("Tip: {}\n", get_random_tip());
+    }
 
     // Initialize chat session
     let mut chat_session = ChatSession::new(&model, &config.proxy.target);
@@ -1784,6 +1796,10 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
     let mut permissions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
+        // Show input hints before prompt
+        let mode_str = chat_session.mode.display().to_lowercase();
+        let _ = tui::render_input_prompt(&mode_str);
+
         let readline = rl.readline("> ");
 
         match readline {

@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Simplify TUI welcome screen with purple and gold styling (#57)
+- Add rich TUI interface similar to Claude Code (#53)
 - Add robust interactive CLI with slash commands, session management, and TUI improvements (#27)
 - Integrate all dead code modules into OpenClaudia proxy and CLI (#14)
 - Add Claude Code hook compatibility for .claude/hooks directory (#26)
@@ -25,8 +27,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add hook engine with all 12 event types (#4)
 
 ### Fixed
+- Fix truncated tips text in TUI welcome screen (#61)
+- Fix TUI box rendering using ASCII-compatible characters (#60)
+- Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Integrate TUI input prompt hints into chat interface (#58)
+- Add styled input area with shortcuts hints (#56)
+- Add two-column welcome layout with tips and recent activity (#55)
+- Add welcome banner with ASCII art logo and version (#54)
 - Add keyboard shortcut handling to use configured keybindings (#52)
 - Integrate PluginManager for plugin discovery and loading (#18)
 - Integrate McpManager for external tool server support (#17)
