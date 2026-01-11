@@ -7,6 +7,7 @@ mod config;
 mod context;
 mod hooks;
 mod mcp;
+mod memory;
 mod plugins;
 mod providers;
 mod proxy;
@@ -35,6 +36,10 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Enable stateful agent mode with per-project memory
+    #[arg(long, global = true)]
+    stateful: bool,
 }
 
 #[derive(Subcommand)]
@@ -102,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        None => cmd_chat(cli.model).await,
+        None => cmd_chat(cli.model, cli.stateful).await,
         Some(Commands::Init { force }) => cmd_init(force),
         Some(Commands::Start { port, host, target }) => cmd_start(port, host, target).await,
         Some(Commands::Config) => cmd_config(),
@@ -488,6 +493,8 @@ enum SlashCommandResult {
     Keybindings,
     /// Rename session with new title
     Rename(String),
+    /// Memory command with subcommand and args
+    Memory(String),
     /// Show help message (already printed)
     Handled,
 }
@@ -974,6 +981,16 @@ fn handle_slash_command(input: &str, messages: &mut Vec<serde_json::Value>, prov
             println!("  /version         - Show version and system information");
             println!("  /debug           - Show debug info (paths, env vars, config)");
             println!();
+            println!("Memory Commands (stateful mode):");
+            println!("  /memory          - Show memory stats");
+            println!("  /memory list     - List recent memories");
+            println!("  /memory search q - Search memories for query");
+            println!("  /memory show <n> - Show memory by ID or section name");
+            println!("  /memory delete n - Delete memory by ID");
+            println!("  /memory core     - Show core memory sections");
+            println!("  /memory clear    - Clear archival memory (keeps core)");
+            println!("  /memory reset    - Reset all memory (with confirmation)");
+            println!();
             println!("Shell Commands:");
             println!("  !<cmd>           - Execute shell command (e.g., !ls -la)");
             println!();
@@ -1207,9 +1224,204 @@ fn handle_slash_command(input: &str, messages: &mut Vec<serde_json::Value>, prov
             println!();
             Some(SlashCommandResult::Handled)
         }
+        "memory" | "mem" => {
+            // Memory command - pass subcommand to main loop where memory_db is available
+            Some(SlashCommandResult::Memory(args.to_string()))
+        }
         _ => {
             eprintln!("Unknown command: /{}. Type /help for available commands.\n", cmd);
             Some(SlashCommandResult::Handled)
+        }
+    }
+}
+
+/// Handle /memory command for viewing and managing archival memory
+fn handle_memory_command(args: &str, memory_db: Option<&memory::MemoryDb>) {
+    let db = match memory_db {
+        Some(db) => db,
+        None => {
+            println!("\n\x1b[33mMemory commands require stateful mode.\x1b[0m");
+            println!("Start with: openclaudia --stateful\n");
+            return;
+        }
+    };
+
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    let subcmd = parts.first().map(|s| s.to_lowercase()).unwrap_or_default();
+    let subargs = parts.get(1).copied().unwrap_or("");
+
+    match subcmd.as_str() {
+        "" | "stats" => {
+            // Show memory statistics
+            match db.memory_stats() {
+                Ok(stats) => {
+                    println!("\n=== Memory Statistics ===");
+                    println!("  Archival memories: {}", stats.count);
+                    println!("  Total size:        {} bytes", stats.total_size);
+                    if let Some(last) = stats.last_updated {
+                        println!("  Last updated:      {}", last);
+                    }
+                    println!("  Database path:     {}", db.path().display());
+                    println!();
+                }
+                Err(e) => eprintln!("\nFailed to get memory stats: {}\n", e),
+            }
+        }
+        "list" | "ls" => {
+            let limit = subargs.parse().unwrap_or(10);
+            match db.memory_list(limit) {
+                Ok(memories) => {
+                    if memories.is_empty() {
+                        println!("\nNo memories stored yet.\n");
+                    } else {
+                        println!("\n=== Recent Memories ({}) ===\n", memories.len());
+                        for mem in memories {
+                            let preview = if mem.content.len() > 80 {
+                                format!("{}...", &mem.content[..77])
+                            } else {
+                                mem.content.clone()
+                            };
+                            let tags = if mem.tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" [{}]", mem.tags.join(", "))
+                            };
+                            println!("  \x1b[36m#{}\x1b[0m {}{}", mem.id, preview, tags);
+                        }
+                        println!();
+                    }
+                }
+                Err(e) => eprintln!("\nFailed to list memories: {}\n", e),
+            }
+        }
+        "search" | "find" => {
+            if subargs.is_empty() {
+                println!("\nUsage: /memory search <query>\n");
+                return;
+            }
+            match db.memory_search(subargs, 10) {
+                Ok(memories) => {
+                    if memories.is_empty() {
+                        println!("\nNo memories found matching '{}'.\n", subargs);
+                    } else {
+                        println!("\n=== Search Results for '{}' ({}) ===\n", subargs, memories.len());
+                        for mem in memories {
+                            let preview = if mem.content.len() > 100 {
+                                format!("{}...", &mem.content[..97])
+                            } else {
+                                mem.content.clone()
+                            };
+                            println!("  \x1b[36m#{}\x1b[0m ({})", mem.id, mem.updated_at);
+                            println!("  {}", preview);
+                            if !mem.tags.is_empty() {
+                                println!("  Tags: {}", mem.tags.join(", "));
+                            }
+                            println!();
+                        }
+                    }
+                }
+                Err(e) => eprintln!("\nFailed to search memories: {}\n", e),
+            }
+        }
+        "show" | "get" => {
+            // First try to parse as an ID for archival memory
+            if let Ok(id) = subargs.parse::<i64>() {
+                match db.memory_get(id) {
+                    Ok(Some(mem)) => {
+                        println!("\n=== Memory #{} ===", mem.id);
+                        println!("Created:  {}", mem.created_at);
+                        println!("Updated:  {}", mem.updated_at);
+                        if !mem.tags.is_empty() {
+                            println!("Tags:     {}", mem.tags.join(", "));
+                        }
+                        println!("\n{}\n", mem.content);
+                    }
+                    Ok(None) => println!("\nMemory #{} not found.\n", id),
+                    Err(e) => eprintln!("\nFailed to get memory: {}\n", e),
+                }
+            } else if !subargs.is_empty() {
+                // Try as core memory section name
+                match db.get_core_memory_section(subargs) {
+                    Ok(Some(section)) => {
+                        println!("\n=== Core Memory: {} ===", section.section);
+                        println!("Updated: {}\n", section.updated_at);
+                        println!("{}\n", section.content);
+                    }
+                    Ok(None) => {
+                        println!("\nSection '{}' not found.", subargs);
+                        println!("Available sections: persona, project_info, user_preferences\n");
+                    }
+                    Err(e) => eprintln!("\nFailed to get core memory section: {}\n", e),
+                }
+            } else {
+                println!("\nUsage:");
+                println!("  /memory show <id>        - Show archival memory by ID");
+                println!("  /memory show <section>   - Show core memory section");
+                println!("  Available sections: persona, project_info, user_preferences\n");
+            }
+        }
+        "delete" | "rm" => {
+            let id: i64 = match subargs.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("\nUsage: /memory delete <id>\n");
+                    return;
+                }
+            };
+            match db.memory_delete(id) {
+                Ok(true) => println!("\nDeleted memory #{}.\n", id),
+                Ok(false) => println!("\nMemory #{} not found.\n", id),
+                Err(e) => eprintln!("\nFailed to delete memory: {}\n", e),
+            }
+        }
+        "core" => {
+            match db.get_core_memory() {
+                Ok(sections) => {
+                    println!("\n=== Core Memory ===\n");
+                    for section in sections {
+                        println!("\x1b[35m[{}]\x1b[0m (updated: {})", section.section, section.updated_at);
+                        println!("{}\n", section.content);
+                    }
+                }
+                Err(e) => eprintln!("\nFailed to get core memory: {}\n", e),
+            }
+        }
+        "clear" => {
+            // Clear only archival memory, keep core memory
+            if subargs == "confirm" || subargs == "yes" {
+                match db.clear_archival_memory() {
+                    Ok(count) => {
+                        println!("\n\x1b[32mCleared {} archival memories.\x1b[0m", count);
+                        println!("Core memory sections preserved.\n");
+                    }
+                    Err(e) => eprintln!("\nFailed to clear archival memory: {}\n", e),
+                }
+            } else {
+                println!("\n\x1b[33mWarning: This will delete all archival memories!\x1b[0m");
+                println!("Core memory sections (persona, project_info, user_preferences) will be preserved.");
+                println!("\nTo confirm, run: /memory clear confirm\n");
+            }
+        }
+        "reset" => {
+            // Full reset - clears both archival AND core memory
+            if subargs == "confirm" || subargs == "yes" {
+                match db.reset_all() {
+                    Ok(()) => {
+                        println!("\n\x1b[32mMemory completely reset.\x1b[0m");
+                        println!("All archival memories deleted.");
+                        println!("Core memory sections reset to defaults.\n");
+                    }
+                    Err(e) => eprintln!("\nFailed to reset memory: {}\n", e),
+                }
+            } else {
+                println!("\n\x1b[31mWarning: This will delete ALL memories!\x1b[0m");
+                println!("This includes archival memory AND core memory sections.");
+                println!("\nTo confirm, run: /memory reset confirm\n");
+            }
+        }
+        _ => {
+            println!("\nUnknown memory subcommand: {}", subcmd);
+            println!("Available: list, search, show, delete, core, clear, reset\n");
         }
     }
 }
@@ -1691,7 +1903,7 @@ fn get_random_tip() -> &'static str {
 }
 
 /// Interactive chat mode (default command)
-async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
+async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Result<()> {
     use crate::hooks::{load_claude_code_hooks, merge_hooks_config, HookEngine, HookEvent, HookInput};
     use crate::providers::get_adapter;
     use crate::rules::RulesEngine;
@@ -1792,6 +2004,42 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
 
     // Initialize chat session
     let mut chat_session = ChatSession::new(&model, &config.proxy.target);
+
+    // Initialize memory database for stateful mode
+    let memory_db: Option<memory::MemoryDb> = if stateful {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match memory::MemoryDb::open_for_project(&cwd) {
+            Ok(db) => {
+                println!("\x1b[35m🧠 Stateful mode enabled\x1b[0m - Memory: {}", db.path().display());
+
+                // Inject core memory into session at start
+                if let Ok(core_memory) = db.format_core_memory_for_prompt() {
+                    chat_session.messages.push(serde_json::json!({
+                        "role": "system",
+                        "content": format!(
+                            "You are running in STATEFUL MODE. You have persistent memory across sessions.\n\n\
+                            {}\n\n\
+                            IMPORTANT: Use your memory tools to:\n\
+                            - Save important facts, decisions, and learnings with memory_save\n\
+                            - Search for relevant context with memory_search\n\
+                            - Update your core memory sections to refine your understanding\n\
+                            - Your core memory is always present in context and persists across sessions",
+                            core_memory
+                        )
+                    }));
+                }
+
+                Some(db)
+            }
+            Err(e) => {
+                eprintln!("\x1b[33mWarning: Failed to initialize memory database: {}\x1b[0m", e);
+                eprintln!("Continuing without stateful memory.\n");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Initialize permissions cache for sensitive operations
     let mut permissions: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1949,6 +2197,10 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
                             println!("\nSession renamed to: {}\n", new_title);
                             continue;
                         }
+                        SlashCommandResult::Memory(args) => {
+                            handle_memory_command(&args, memory_db.as_ref());
+                            continue;
+                        }
                         SlashCommandResult::Handled => {
                             continue;
                         }
@@ -2063,7 +2315,7 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
                     "messages": chat_session.messages,
                     "max_tokens": 4096,
                     "stream": true,
-                    "tools": tools::get_tool_definitions()
+                    "tools": tools::get_all_tool_definitions(stateful)
                 });
 
                 // Get endpoint and headers
@@ -2218,7 +2470,12 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
                                 for tool_call in &tool_calls {
                                     println!("\n\x1b[36m⚡ Running {}...\x1b[0m", tool_call.function.name);
 
-                                    let result = tools::execute_tool(tool_call);
+                                    // Use appropriate tool executor based on stateful mode
+                                    let result = if let Some(ref db) = memory_db {
+                                        tools::execute_tool_with_memory(tool_call, Some(db))
+                                    } else {
+                                        tools::execute_tool(tool_call)
+                                    };
 
                                     // Show result preview
                                     let preview: String = result.content.lines().take(5).collect::<Vec<_>>().join("\n");
@@ -2248,7 +2505,7 @@ async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
                                     "messages": chat_session.messages,
                                     "max_tokens": 4096,
                                     "stream": true,
-                                    "tools": tools::get_tool_definitions()
+                                    "tools": tools::get_all_tool_definitions(stateful)
                                 });
 
                                 // Send follow-up request

@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Build OpenClaudia - Universal Agent Harness (#2)
+- Add experimental stateful agent mode with per-project memory (#71)
 - Simplify TUI welcome screen with purple and gold styling (#57)
 - Add rich TUI interface similar to Claude Code (#53)
 - Add robust interactive CLI with slash commands, session management, and TUI improvements (#27)
@@ -27,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add hook engine with all 12 event types (#4)
 
 ### Fixed
+- Update dependencies to fix net2 deprecation warning (#22)
 - Fix bash tool to use PowerShell on Windows for better command compatibility (#70)
 - Fix tool use not working with zai/GLM provider (#63)
 - Fix truncated tips text in TUI welcome screen (#61)
@@ -34,6 +37,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Add /memory command to view and manage archival memory (#77)
+- Integrate stateful memory with chat loop and tool execution (#76)
+- Implement core memory injection into system prompt (#75)
+- Implement memory tools for agent (save, search, update) (#74)
+- Add SQLite memory database module with schema and initialization (#73)
+- Add --stateful CLI flag and stateful mode detection (#72)
 - Improve tool execution loop to use all ToolCallAccumulator methods (#69)
 - Implement tool execution loop (#67)
 - Parse tool_calls from streaming response (#66)
