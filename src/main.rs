@@ -15,6 +15,7 @@ mod rules;
 mod session;
 mod tools;
 mod tui;
+mod web;
 
 use clap::{Parser, Subcommand};
 use std::fs;

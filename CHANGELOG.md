@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Add web search tool for knowledge retrieval (#92)
 - Add dedicated chainlink tool for task management (#86)
 - Improve Windows shell compatibility by using Git Bash instead of PowerShell (#85)
 - Build OpenClaudia - Universal Agent Harness (#2)
@@ -40,6 +41,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Add web_browser tool using headless-chrome (#95)
+- Add web_search tool with Tavily/Brave API support (#94)
+- Add web_fetch tool using Jina Reader (#93)
 - Fix chainlink tool to properly find and execute the chainlink binary (#88)
 - Add helpful install message when chainlink is not found (#87)
 - Add /memory command to view and manage archival memory (#77)
