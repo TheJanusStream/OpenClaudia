@@ -347,6 +347,57 @@ fn execute_list_files(args: &HashMap<String, Value>) -> (String, bool) {
     }
 }
 
+/// Find the chainlink binary path
+fn find_chainlink_binary() -> Option<std::path::PathBuf> {
+    // First, try to find chainlink in PATH using platform-specific lookup
+    #[cfg(windows)]
+    {
+        // Use 'where' command on Windows to find chainlink in PATH
+        if let Ok(output) = Command::new("where").arg("chainlink").output() {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout);
+                if let Some(first_line) = path_str.lines().next() {
+                    let path = std::path::PathBuf::from(first_line.trim());
+                    if path.exists() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Use 'which' command on Unix to find chainlink in PATH
+        if let Ok(output) = Command::new("which").arg("chainlink").output() {
+            if output.status.success() {
+                let path_str = String::from_utf8_lossy(&output.stdout);
+                let path = std::path::PathBuf::from(path_str.trim());
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    // If not in PATH, try common local locations
+    let local_paths = [
+        "chainlink",
+        "chainlink.exe",
+        "./chainlink",
+        "./chainlink.exe",
+    ];
+
+    for path_str in &local_paths {
+        let path = std::path::PathBuf::from(path_str);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
 /// Execute chainlink command for task management
 fn execute_chainlink(args: &HashMap<String, Value>) -> (String, bool) {
     let cmd_args = match args.get("args").and_then(|v| v.as_str()) {
@@ -354,72 +405,59 @@ fn execute_chainlink(args: &HashMap<String, Value>) -> (String, bool) {
         None => return ("Missing 'args' argument".to_string(), true),
     };
 
-    // Try to find chainlink in common locations
-    let chainlink_paths = [
-        "chainlink",                                    // In PATH
-        "chainlink.exe",                                // Windows in PATH
-        "./chainlink",                                  // Current directory
-        "./chainlink.exe",                              // Current directory Windows
-        "../chainlink/target/release/chainlink",        // Relative dev path
-        "../chainlink/target/release/chainlink.exe",   // Relative dev path Windows
-    ];
+    // Find the chainlink binary
+    let chainlink_path = match find_chainlink_binary() {
+        Some(path) => path,
+        None => {
+            // Show helpful install message only once per session
+            let show_install_help = !CHAINLINK_INSTALL_SHOWN.swap(true, Ordering::Relaxed);
 
-    let mut last_error = String::new();
-
-    for chainlink_path in &chainlink_paths {
-        // Use shell to handle argument parsing properly
-        #[cfg(windows)]
-        let output = Command::new("cmd")
-            .args(["/C", &format!("{} {}", chainlink_path, cmd_args)])
-            .output();
-
-        #[cfg(not(windows))]
-        let output = Command::new("sh")
-            .args(["-c", &format!("{} {}", chainlink_path, cmd_args)])
-            .output();
-
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-
-                // If command succeeded or produced output, return it
-                if output.status.success() || !stdout.is_empty() {
-                    let mut result = stdout.to_string();
-                    if !stderr.is_empty() && !output.status.success() {
-                        if !result.is_empty() {
-                            result.push('\n');
-                        }
-                        result.push_str(&stderr);
-                    }
-                    if result.is_empty() {
-                        result = "(chainlink command completed)".to_string();
-                    }
-                    return (result.trim().to_string(), !output.status.success());
-                }
-
-                // Command ran but failed - might be wrong chainlink or missing
-                last_error = stderr.to_string();
-            }
-            Err(e) => {
-                last_error = e.to_string();
-                continue; // Try next path
+            if show_install_help {
+                return (
+                    "Chainlink not found. Chainlink is a lightweight issue tracking tool designed to integrate with AI agents.\n\n\
+                    Install from: https://github.com/dollspace-gay/chainlink".to_string(),
+                    true
+                );
+            } else {
+                return ("Chainlink not available.".to_string(), true);
             }
         }
-    }
+    };
 
-    // Show helpful install message only once per session
-    let show_install_help = !CHAINLINK_INSTALL_SHOWN.swap(true, Ordering::Relaxed);
+    // Execute chainlink with the provided arguments
+    // Use shell to properly parse quoted arguments in cmd_args
+    #[cfg(windows)]
+    let output = Command::new("cmd")
+        .args(["/C", &format!("\"{}\" {}", chainlink_path.display(), cmd_args)])
+        .output();
 
-    if show_install_help {
-        (format!(
-            "Chainlink not found. Chainlink is a lightweight issue tracking tool designed to integrate with AI agents.\n\n\
-            Install from: https://github.com/dollspace-gay/chainlink\n\n\
-            Error: {}",
-            last_error
-        ), true)
-    } else {
-        (format!("Chainlink not available: {}", last_error), true)
+    #[cfg(not(windows))]
+    let output = Command::new("sh")
+        .args(["-c", &format!("\"{}\" {}", chainlink_path.display(), cmd_args)])
+        .output();
+
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            let mut result = stdout.to_string();
+            if !stderr.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                if !output.status.success() {
+                    result.push_str("Error: ");
+                }
+                result.push_str(&stderr);
+            }
+            if result.is_empty() {
+                result = "(chainlink command completed)".to_string();
+            }
+
+            (result.trim().to_string(), !output.status.success())
+        }
+        Err(e) => (format!("Failed to execute chainlink: {}", e), true),
     }
 }
 

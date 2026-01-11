@@ -39,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Fix chainlink tool to properly find and execute the chainlink binary (#88)
 - Add helpful install message when chainlink is not found (#87)
 - Add /memory command to view and manage archival memory (#77)
 - Integrate stateful memory with chat loop and tool execution (#76)
