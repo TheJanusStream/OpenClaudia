@@ -19,6 +19,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Track if we've shown the chainlink install message (only show once per session)
+static CHAINLINK_INSTALL_SHOWN: AtomicBool = AtomicBool::new(false);
 
 /// Tool call from the model
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +145,23 @@ pub fn get_tool_definitions() -> Value {
                         }
                     },
                     "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "chainlink",
+                "description": "Task management tool for tracking issues and work. Commands: 'create \"title\" -p priority' (create issue), 'close ID' (close issue), 'comment ID \"text\"' (add comment), 'label ID label' (add label), 'list' (show open issues), 'show ID' (show issue details), 'subissue ID \"title\"' (create subissue), 'session start/end/work ID' (session management).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "args": {
+                            "type": "string",
+                            "description": "The chainlink command arguments (e.g., 'create \"Fix bug\" -p high' or 'close 5')"
+                        }
+                    },
+                    "required": ["args"]
                 }
             }
         }
@@ -323,6 +344,82 @@ fn execute_list_files(args: &HashMap<String, Value>) -> (String, bool) {
             (items.join("\n"), false)
         }
         Err(e) => (format!("Failed to list directory '{}': {}", path, e), true),
+    }
+}
+
+/// Execute chainlink command for task management
+fn execute_chainlink(args: &HashMap<String, Value>) -> (String, bool) {
+    let cmd_args = match args.get("args").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => return ("Missing 'args' argument".to_string(), true),
+    };
+
+    // Try to find chainlink in common locations
+    let chainlink_paths = [
+        "chainlink",                                    // In PATH
+        "chainlink.exe",                                // Windows in PATH
+        "./chainlink",                                  // Current directory
+        "./chainlink.exe",                              // Current directory Windows
+        "../chainlink/target/release/chainlink",        // Relative dev path
+        "../chainlink/target/release/chainlink.exe",   // Relative dev path Windows
+    ];
+
+    let mut last_error = String::new();
+
+    for chainlink_path in &chainlink_paths {
+        // Use shell to handle argument parsing properly
+        #[cfg(windows)]
+        let output = Command::new("cmd")
+            .args(["/C", &format!("{} {}", chainlink_path, cmd_args)])
+            .output();
+
+        #[cfg(not(windows))]
+        let output = Command::new("sh")
+            .args(["-c", &format!("{} {}", chainlink_path, cmd_args)])
+            .output();
+
+        match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                // If command succeeded or produced output, return it
+                if output.status.success() || !stdout.is_empty() {
+                    let mut result = stdout.to_string();
+                    if !stderr.is_empty() && !output.status.success() {
+                        if !result.is_empty() {
+                            result.push('\n');
+                        }
+                        result.push_str(&stderr);
+                    }
+                    if result.is_empty() {
+                        result = "(chainlink command completed)".to_string();
+                    }
+                    return (result.trim().to_string(), !output.status.success());
+                }
+
+                // Command ran but failed - might be wrong chainlink or missing
+                last_error = stderr.to_string();
+            }
+            Err(e) => {
+                last_error = e.to_string();
+                continue; // Try next path
+            }
+        }
+    }
+
+    // Show helpful install message only once per session
+    let show_install_help = !CHAINLINK_INSTALL_SHOWN.swap(true, Ordering::Relaxed);
+
+    if show_install_help {
+        (format!(
+            "Chainlink not found. Chainlink is a lightweight issue tracking tool designed to integrate with AI agents.\n\n\
+            Install from: https://github.com/dollspace-gay/chainlink\n\n\
+            Error: {}",
+            last_error
+        ), true)
+    } else {
+        (format!("Chainlink not available: {}", last_error), true)
     }
 }
 
@@ -528,6 +625,7 @@ pub fn execute_tool_with_memory(tool_call: &ToolCall, memory_db: Option<&MemoryD
         "write_file" => execute_write_file(&args),
         "edit_file" => execute_edit_file(&args),
         "list_files" => execute_list_files(&args),
+        "chainlink" => execute_chainlink(&args),
 
         // Memory tools (require stateful mode)
         "memory_save" => {

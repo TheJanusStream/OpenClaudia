@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Add dedicated chainlink tool for task management (#86)
 - Improve Windows shell compatibility by using Git Bash instead of PowerShell (#85)
 - Build OpenClaudia - Universal Agent Harness (#2)
 - Add experimental stateful agent mode with per-project memory (#71)
@@ -38,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Add helpful install message when chainlink is not found (#87)
 - Add /memory command to view and manage archival memory (#77)
 - Integrate stateful memory with chat loop and tool execution (#76)
 - Implement core memory injection into system prompt (#75)
