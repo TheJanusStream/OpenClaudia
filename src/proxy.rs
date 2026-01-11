@@ -149,7 +149,7 @@ pub fn create_router(state: ProxyState) -> Router {
         // Anthropic-compatible endpoints (for direct Anthropic clients)
         .route("/v1/messages", any(proxy_anthropic_messages))
         // Catch-all for other API routes
-        .route("/v1/*path", any(proxy_passthrough))
+        .route("/v1/{*path}", any(proxy_passthrough))
         .with_state(state)
 }
 

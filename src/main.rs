@@ -24,7 +24,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(author, version, about = "Open-source universal agent harness")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    /// Model to use for chat
+    #[arg(short, long, global = true)]
+    model: Option<String>,
 
     /// Enable verbose logging
     #[arg(short, long, global = true)]
@@ -96,15 +100,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command {
-        Commands::Init { force } => cmd_init(force),
-        Commands::Start { port, host, target } => cmd_start(port, host, target).await,
-        Commands::Config => cmd_config(),
-        Commands::Doctor => cmd_doctor().await,
-        Commands::Loop {
+        None => cmd_chat(cli.model).await,
+        Some(Commands::Init { force }) => cmd_init(force),
+        Some(Commands::Start { port, host, target }) => cmd_start(port, host, target).await,
+        Some(Commands::Config) => cmd_config(),
+        Some(Commands::Doctor) => cmd_doctor().await,
+        Some(Commands::Loop {
             max_iterations,
             port,
             target,
-        } => cmd_loop(max_iterations, port, target).await,
+        }) => cmd_loop(max_iterations, port, target).await,
     }
 }
 
@@ -240,9 +245,161 @@ These rules are injected into every conversation.
     info!("Set your API key:");
     info!("  export ANTHROPIC_API_KEY=your-key-here");
     info!("");
-    info!("Start the proxy:");
-    info!("  openclaudia start");
+    info!("Start the chat:");
+    info!("  openclaudia");
 
+    Ok(())
+}
+
+/// Interactive chat mode (default command)
+async fn cmd_chat(model_override: Option<String>) -> anyhow::Result<()> {
+    use crate::providers::get_adapter;
+    use std::io::{self, BufRead, Write};
+
+    let config = match config::load_config() {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("No configuration found. Run 'openclaudia init' first.");
+            return Ok(());
+        }
+    };
+
+    let provider = match config.active_provider() {
+        Some(p) => p,
+        None => {
+            eprintln!("No provider configured for target '{}'", config.proxy.target);
+            return Ok(());
+        }
+    };
+
+    let api_key = match &provider.api_key {
+        Some(k) => k.clone(),
+        None => {
+            let env_var = match config.proxy.target.as_str() {
+                "anthropic" => "ANTHROPIC_API_KEY",
+                "openai" => "OPENAI_API_KEY",
+                "google" => "GOOGLE_API_KEY",
+                "zai" => "ZAI_API_KEY",
+                "deepseek" => "DEEPSEEK_API_KEY",
+                "qwen" => "QWEN_API_KEY",
+                _ => "API_KEY",
+            };
+            eprintln!(
+                "No API key configured for '{}'. Set {} or add to config.",
+                config.proxy.target, env_var
+            );
+            return Ok(());
+        }
+    };
+
+    // Determine model
+    let model = model_override
+        .or_else(|| provider.model.clone())
+        .unwrap_or_else(|| match config.proxy.target.as_str() {
+            "anthropic" => "claude-sonnet-4-20250514".to_string(),
+            "openai" => "gpt-4".to_string(),
+            "google" => "gemini-pro".to_string(),
+            "zai" => "glm-4.7".to_string(),
+            "deepseek" => "deepseek-chat".to_string(),
+            "qwen" => "qwen-turbo".to_string(),
+            _ => "gpt-4".to_string(),
+        });
+
+    let adapter = get_adapter(&config.proxy.target);
+    let client = reqwest::Client::new();
+
+    println!("OpenClaudia v{}", env!("CARGO_PKG_VERSION"));
+    println!("Provider: {} | Model: {}", config.proxy.target, model);
+    println!("Type your message (Ctrl+C to exit)\n");
+
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    loop {
+        // Print prompt
+        print!("> ");
+        stdout.flush()?;
+
+        // Read input
+        let mut input = String::new();
+        match stdin.lock().read_line(&mut input) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
+            break;
+        }
+
+        // Add user message
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": input
+        }));
+
+        // Build request
+        let request_body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": 4096
+        });
+
+        // Get endpoint and headers
+        let endpoint = format!("{}{}", provider.base_url, adapter.chat_endpoint());
+        let headers = adapter.get_headers(&api_key);
+
+        // Send request
+        let mut req = client.post(&endpoint).json(&request_body);
+        for (key, value) in headers {
+            req = req.header(&key, &value);
+        }
+
+        println!();
+        match req.send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            // Extract content from response
+                            let content = json
+                                .get("choices")
+                                .and_then(|c| c.get(0))
+                                .and_then(|c| c.get("message"))
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("[No response]");
+
+                            println!("{}\n", content);
+
+                            // Add assistant message to history
+                            messages.push(serde_json::json!({
+                                "role": "assistant",
+                                "content": content
+                            }));
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse response: {}\n", e);
+                        }
+                    }
+                } else {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    eprintln!("Error {}: {}\n", status, body);
+                }
+            }
+            Err(e) => {
+                eprintln!("Request failed: {}\n", e);
+            }
+        }
+    }
+
+    println!("\nGoodbye!");
     Ok(())
 }
 
