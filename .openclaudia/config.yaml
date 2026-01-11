@@ -1,0 +1,40 @@
+# OpenClaudia Configuration
+# https://github.com/yourusername/openclaudia
+
+proxy:
+  port: 8080
+  host: "127.0.0.1"
+  target: anthropic  # Default provider: anthropic, openai, google
+
+providers:
+  anthropic:
+    base_url: https://api.anthropic.com
+    # api_key: ${ANTHROPIC_API_KEY}  # Set via environment variable
+  openai:
+    base_url: https://api.openai.com
+    # api_key: ${OPENAI_API_KEY}
+  google:
+    base_url: https://generativelanguage.googleapis.com
+    # api_key: ${GOOGLE_API_KEY}
+
+# Hooks run at key moments in the agent lifecycle
+# See: https://github.com/yourusername/openclaudia/docs/hooks.md
+# hooks:
+#   session_start:
+#     - hooks:
+#         - type: command
+#           command: python .openclaudia/hooks/session-start.py
+#           timeout: 30
+#   pre_tool_use:
+#     - matcher: "Write|Edit"
+#       hooks:
+#         - type: command
+#           command: python .openclaudia/hooks/validate-write.py
+#   user_prompt_submit:
+#     - hooks:
+#         - type: command
+#           command: python .openclaudia/hooks/prompt-guard.py
+
+session:
+  timeout_minutes: 30
+  persist_path: .openclaudia/session

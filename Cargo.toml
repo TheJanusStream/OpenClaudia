@@ -1,0 +1,65 @@
+[package]
+name = "openclaudia"
+version = "0.1.0"
+edition = "2021"
+description = "Open-source universal agent harness - Claude Code capabilities for any AI"
+license = "MIT"
+repository = "https://github.com/yourusername/openclaudia"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server (axum 0.8)
+axum = { version = "0.8", features = ["json", "ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# HTTP client for upstream requests
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Configuration
+config = "0.14"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# UUID for session IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Filesystem
+dirs = "6"
+
+# Regex for hook matchers
+regex = "1"
+
+# Process execution for hooks
+tokio-process = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "openclaudia"
+path = "src/main.rs"
