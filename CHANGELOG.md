@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Improve Windows shell compatibility by using Git Bash instead of PowerShell (#85)
 - Build OpenClaudia - Universal Agent Harness (#2)
 - Add experimental stateful agent mode with per-project memory (#71)
 - Simplify TUI welcome screen with purple and gold styling (#57)

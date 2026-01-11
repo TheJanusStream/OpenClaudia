@@ -51,13 +51,13 @@ pub fn get_tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Execute a bash/shell command and return the output. Use this for running commands, installing packages, git operations, etc.",
+                "description": "Execute a bash shell command and return the output. On Windows, Git Bash is used so standard Unix commands (ls, grep, find, cat, etc.) work normally. Use this for running commands, installing packages, git operations, file exploration, etc.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "The shell command to execute"
+                            "description": "The bash command to execute. Unix-style commands work on all platforms."
                         }
                     },
                     "required": ["command"]
@@ -163,15 +163,9 @@ fn execute_bash(args: &HashMap<String, Value>) -> (String, bool) {
         None => return ("Missing 'command' argument".to_string(), true),
     };
 
-    // Use appropriate shell based on platform
-    // On Windows, use PowerShell for better Unix command compatibility (ls, cat, curl, etc.)
-    #[cfg(windows)]
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", command])
-        .output();
-
-    #[cfg(not(windows))]
-    let output = Command::new("sh")
+    // Use bash on all platforms
+    // On Windows, this uses Git Bash for proper Unix command support (ls, grep, find, etc.)
+    let output = Command::new("bash")
         .args(["-c", command])
         .output();
 
