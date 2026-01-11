@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add hook engine with all 12 event types (#4)
 
 ### Fixed
+- Fix bash tool to use Git Bash instead of WSL on Windows (#90)
 - Update dependencies to fix net2 deprecation warning (#22)
 - Fix bash tool to use PowerShell on Windows for better command compatibility (#70)
 - Fix tool use not working with zai/GLM provider (#63)

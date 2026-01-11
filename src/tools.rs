@@ -177,6 +177,45 @@ pub fn execute_tool(tool_call: &ToolCall) -> ToolResult {
     execute_tool_with_memory(tool_call, None)
 }
 
+/// Find Git Bash on Windows
+#[cfg(windows)]
+fn find_git_bash() -> Option<std::path::PathBuf> {
+    // Common Git Bash locations on Windows
+    let paths = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        r"C:\Git\bin\bash.exe",
+    ];
+
+    for path in &paths {
+        let p = std::path::PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // Try to find via 'where git' and derive bash path
+    if let Ok(output) = Command::new("where").arg("git").output() {
+        if output.status.success() {
+            let git_path = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_line) = git_path.lines().next() {
+                // git.exe is usually in cmd/ or bin/, bash is in bin/
+                let git_dir = std::path::Path::new(first_line.trim())
+                    .parent()
+                    .and_then(|p| p.parent());
+                if let Some(git_root) = git_dir {
+                    let bash = git_root.join("bin").join("bash.exe");
+                    if bash.exists() {
+                        return Some(bash);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Execute a bash command
 fn execute_bash(args: &HashMap<String, Value>) -> (String, bool) {
     let command = match args.get("command").and_then(|v| v.as_str()) {
@@ -184,8 +223,21 @@ fn execute_bash(args: &HashMap<String, Value>) -> (String, bool) {
         None => return ("Missing 'command' argument".to_string(), true),
     };
 
-    // Use bash on all platforms
-    // On Windows, this uses Git Bash for proper Unix command support (ls, grep, find, etc.)
+    // On Windows, use Git Bash explicitly (not WSL bash)
+    // On Unix, use system bash
+    #[cfg(windows)]
+    let output = {
+        match find_git_bash() {
+            Some(git_bash) => Command::new(git_bash)
+                .args(["-c", command])
+                .output(),
+            None => Command::new("bash")
+                .args(["-c", command])
+                .output(),
+        }
+    };
+
+    #[cfg(not(windows))]
     let output = Command::new("bash")
         .args(["-c", command])
         .output();
@@ -347,99 +399,51 @@ fn execute_list_files(args: &HashMap<String, Value>) -> (String, bool) {
     }
 }
 
-/// Find the chainlink binary path
-fn find_chainlink_binary() -> Option<std::path::PathBuf> {
-    // First, try to find chainlink in PATH using platform-specific lookup
-    #[cfg(windows)]
-    {
-        // Use 'where' command on Windows to find chainlink in PATH
-        if let Ok(output) = Command::new("where").arg("chainlink").output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = path_str.lines().next() {
-                    let path = std::path::PathBuf::from(first_line.trim());
-                    if path.exists() {
-                        return Some(path);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        // Use 'which' command on Unix to find chainlink in PATH
-        if let Ok(output) = Command::new("which").arg("chainlink").output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout);
-                let path = std::path::PathBuf::from(path_str.trim());
-                if path.exists() {
-                    return Some(path);
-                }
-            }
-        }
-    }
-
-    // If not in PATH, try common local locations
-    let local_paths = [
-        "chainlink",
-        "chainlink.exe",
-        "./chainlink",
-        "./chainlink.exe",
-    ];
-
-    for path_str in &local_paths {
-        let path = std::path::PathBuf::from(path_str);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
 /// Execute chainlink command for task management
+/// Uses Git Bash on Windows (which has access to Windows PATH)
 fn execute_chainlink(args: &HashMap<String, Value>) -> (String, bool) {
     let cmd_args = match args.get("args").and_then(|v| v.as_str()) {
         Some(a) => a,
         None => return ("Missing 'args' argument".to_string(), true),
     };
 
-    // Find the chainlink binary
-    let chainlink_path = match find_chainlink_binary() {
-        Some(path) => path,
-        None => {
-            // Show helpful install message only once per session
-            let show_install_help = !CHAINLINK_INSTALL_SHOWN.swap(true, Ordering::Relaxed);
-
-            if show_install_help {
-                return (
-                    "Chainlink not found. Chainlink is a lightweight issue tracking tool designed to integrate with AI agents.\n\n\
-                    Install from: https://github.com/dollspace-gay/chainlink".to_string(),
-                    true
-                );
-            } else {
-                return ("Chainlink not available.".to_string(), true);
-            }
+    // Use Git Bash to run chainlink (same approach as execute_bash)
+    #[cfg(windows)]
+    let output = {
+        match find_git_bash() {
+            Some(git_bash) => Command::new(git_bash)
+                .args(["-c", &format!("chainlink {}", cmd_args)])
+                .output(),
+            None => Command::new("bash")
+                .args(["-c", &format!("chainlink {}", cmd_args)])
+                .output(),
         }
     };
 
-    // Execute chainlink with the provided arguments
-    // Use shell to properly parse quoted arguments in cmd_args
-    #[cfg(windows)]
-    let output = Command::new("cmd")
-        .args(["/C", &format!("\"{}\" {}", chainlink_path.display(), cmd_args)])
-        .output();
-
     #[cfg(not(windows))]
-    let output = Command::new("sh")
-        .args(["-c", &format!("\"{}\" {}", chainlink_path.display(), cmd_args)])
+    let output = Command::new("bash")
+        .args(["-c", &format!("chainlink {}", cmd_args)])
         .output();
 
     match output {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
+
+            // Check if chainlink wasn't found
+            if !output.status.success() &&
+               (stderr.contains("command not found") || stderr.contains("not recognized")) {
+                let show_install_help = !CHAINLINK_INSTALL_SHOWN.swap(true, Ordering::Relaxed);
+                if show_install_help {
+                    return (
+                        "Chainlink not found. Chainlink is a lightweight issue tracking tool designed to integrate with AI agents.\n\n\
+                        Install from: https://github.com/dollspace-gay/chainlink".to_string(),
+                        true
+                    );
+                } else {
+                    return ("Chainlink not available.".to_string(), true);
+                }
+            }
 
             let mut result = stdout.to_string();
             if !stderr.is_empty() {
