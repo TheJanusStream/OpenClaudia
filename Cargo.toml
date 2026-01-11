@@ -54,9 +54,6 @@ dirs = "6"
 # Regex for hook matchers
 regex = "1"
 
-# Process execution for hooks
-tokio-process = "0.2"
-
 [dev-dependencies]
 tempfile = "3"
 

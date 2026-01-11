@@ -208,6 +208,15 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
     if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
         builder = builder.set_override("providers.google.api_key", key)?;
     }
+    if let Ok(key) = std::env::var("ZAI_API_KEY") {
+        builder = builder.set_override("providers.zai.api_key", key)?;
+    }
+    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
+        builder = builder.set_override("providers.deepseek.api_key", key)?;
+    }
+    if let Ok(key) = std::env::var("QWEN_API_KEY") {
+        builder = builder.set_override("providers.qwen.api_key", key)?;
+    }
 
     builder.build()?.try_deserialize()
 }

@@ -574,7 +574,9 @@ pub fn get_adapter(provider: &str) -> Box<dyn ProviderAdapter> {
         "anthropic" => Box::new(AnthropicAdapter::new()),
         "google" | "gemini" => Box::new(GoogleAdapter::new()),
         "zai" | "glm" | "zhipu" => Box::new(ZaiAdapter::new()),
-        // DeepSeek, Qwen, and other OpenAI-compatible providers use OpenAI adapter
+        // OpenAI-compatible providers (explicit)
+        "openai" | "deepseek" | "qwen" => Box::new(OpenAIAdapter::new()),
+        // Default fallback for unknown providers (assume OpenAI-compatible)
         _ => Box::new(OpenAIAdapter::new()),
     }
 }
@@ -681,6 +683,9 @@ mod tests {
         assert_eq!(get_adapter("zai").name(), "zai");
         assert_eq!(get_adapter("glm").name(), "zai");
         assert_eq!(get_adapter("zhipu").name(), "zai");
+        // DeepSeek and Qwen use OpenAI-compatible adapter
+        assert_eq!(get_adapter("deepseek").name(), "openai");
+        assert_eq!(get_adapter("qwen").name(), "openai");
         assert_eq!(get_adapter("unknown").name(), "openai"); // Default
     }
 

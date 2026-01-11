@@ -131,7 +131,7 @@ fn cmd_init(force: bool) -> anyhow::Result<()> {
 proxy:
   port: 8080
   host: "127.0.0.1"
-  target: anthropic  # Default provider: anthropic, openai, google
+  target: anthropic  # Default provider: anthropic, openai, google, zai, deepseek, qwen
 
 providers:
   anthropic:
@@ -143,6 +143,18 @@ providers:
   google:
     base_url: https://generativelanguage.googleapis.com
     # api_key: ${GOOGLE_API_KEY}
+  # Z.AI/GLM (OpenAI-compatible) - Models: GLM-4.7, GLM-4.5-air
+  zai:
+    base_url: https://api.z.ai/api/coding/paas/v4
+    # api_key: ${ZAI_API_KEY}
+  # DeepSeek (OpenAI-compatible) - Models: deepseek-chat, deepseek-coder
+  deepseek:
+    base_url: https://api.deepseek.com
+    # api_key: ${DEEPSEEK_API_KEY}
+  # Qwen/Alibaba (OpenAI-compatible) - Models: qwen-turbo, qwen-plus
+  qwen:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode
+    # api_key: ${QWEN_API_KEY}
 
 # Hooks run at key moments in the agent lifecycle
 # See: https://github.com/yourusername/openclaudia/docs/hooks.md
@@ -260,6 +272,9 @@ async fn cmd_start(
                 "anthropic" => "ANTHROPIC_API_KEY",
                 "openai" => "OPENAI_API_KEY",
                 "google" => "GOOGLE_API_KEY",
+                "zai" => "ZAI_API_KEY",
+                "deepseek" => "DEEPSEEK_API_KEY",
+                "qwen" => "QWEN_API_KEY",
                 _ => "API_KEY",
             };
             error!(
@@ -660,6 +675,9 @@ async fn cmd_loop(
                 "anthropic" => "ANTHROPIC_API_KEY",
                 "openai" => "OPENAI_API_KEY",
                 "google" => "GOOGLE_API_KEY",
+                "zai" => "ZAI_API_KEY",
+                "deepseek" => "DEEPSEEK_API_KEY",
+                "qwen" => "QWEN_API_KEY",
                 _ => "API_KEY",
             };
             error!(

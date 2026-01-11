@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Add DeepSeek and Qwen provider support with OpenAI-compatible API
+- Add Z.AI/GLM provider to default generated config.yaml (#23)
 - Add Z.AI/GLM provider support for OpenAI-compatible API (#21)
 - Add plugin API with manifest validation and loading (#10)
 - Add MCP integration layer for external tool servers (#9)
