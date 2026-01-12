@@ -66,6 +66,14 @@ pub fn build_system_prompt(
                 prompt.push_str(&core_memory);
             }
         }
+
+        // Add recent session context (short-term memory)
+        if let Ok(recent_context) = db.format_recent_context_for_prompt() {
+            if !recent_context.is_empty() {
+                prompt.push_str("\n\n## Recent Work\n");
+                prompt.push_str(&recent_context);
+            }
+        }
     }
 
     // Add hook instructions (from active hooks)

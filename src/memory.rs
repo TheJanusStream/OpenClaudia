@@ -10,10 +10,39 @@ use std::path::{Path, PathBuf};
 /// Memory database file name
 const MEMORY_DB_NAME: &str = "memory.db";
 
+/// Current schema version - increment when adding migrations
+const SCHEMA_VERSION: i64 = 2;
+
+/// Short-term memory expiration (hours)
+const SHORT_TERM_EXPIRY_HOURS: i64 = 48;
+
 /// Core memory section names
 pub const SECTION_PERSONA: &str = "persona";
 pub const SECTION_PROJECT_INFO: &str = "project_info";
 pub const SECTION_USER_PREFS: &str = "user_preferences";
+
+/// Recent session summary (short-term memory)
+#[derive(Debug, Clone)]
+pub struct RecentSession {
+    pub id: i64,
+    pub session_id: String,
+    pub summary: String,
+    pub files_modified: Vec<String>,
+    pub issues_worked: Vec<String>,
+    pub started_at: String,
+    pub ended_at: String,
+}
+
+/// Recent activity entry
+#[derive(Debug, Clone)]
+pub struct RecentActivity {
+    pub id: i64,
+    pub session_id: String,
+    pub activity_type: String, // "file_read", "file_write", "tool_call", "issue_created", "issue_closed"
+    pub target: String,        // file path, tool name, issue number
+    pub details: Option<String>,
+    pub created_at: String,
+}
 
 /// A single archival memory entry
 #[derive(Debug, Clone)]
@@ -69,8 +98,53 @@ impl MemoryDb {
         &self.path
     }
 
-    /// Ensure database schema exists
+    /// Ensure database schema exists and run migrations
     fn ensure_schema(&mut self) -> Result<()> {
+        // Create version tracking table first
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)",
+            [],
+        )?;
+
+        // Get current version (0 if table is empty = new db or pre-versioning db)
+        let current_version: i64 = self.conn
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        // Run migrations
+        if current_version < SCHEMA_VERSION {
+            tracing::info!("Migrating memory database from version {} to {}", current_version, SCHEMA_VERSION);
+            self.run_migrations(current_version)?;
+        }
+
+        Ok(())
+    }
+
+    /// Run all migrations from current_version to SCHEMA_VERSION
+    fn run_migrations(&mut self, from_version: i64) -> Result<()> {
+        // Version 1: Original schema (archival_memory, core_memory)
+        if from_version < 1 {
+            self.migrate_v1()?;
+        }
+
+        // Version 2: Add short-term memory tables
+        if from_version < 2 {
+            self.migrate_v2()?;
+        }
+
+        // Record current version
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
+            params![SCHEMA_VERSION],
+        )?;
+
+        tracing::info!("Database migration complete. Now at version {}", SCHEMA_VERSION);
+        Ok(())
+    }
+
+    /// Migration v1: Original schema
+    fn migrate_v1(&mut self) -> Result<()> {
+        tracing::debug!("Running migration v1: core schema");
         self.conn.execute_batch(
             r#"
             -- Archival memory table for long-term storage
@@ -121,7 +195,41 @@ impl MemoryDb {
                 ('project_info', 'No project information recorded yet.'),
                 ('user_preferences', 'No user preferences recorded yet.');
             "#,
-        ).context("Failed to create memory database schema")?;
+        ).context("Failed to create v1 schema")?;
+
+        Ok(())
+    }
+
+    /// Migration v2: Add short-term memory tables
+    fn migrate_v2(&mut self) -> Result<()> {
+        tracing::debug!("Running migration v2: short-term memory tables");
+        self.conn.execute_batch(
+            r#"
+            -- Short-term memory: Recent session summaries
+            CREATE TABLE IF NOT EXISTS recent_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                summary TEXT NOT NULL,
+                files_modified TEXT DEFAULT '',
+                issues_worked TEXT DEFAULT '',
+                started_at TEXT DEFAULT (datetime('now')),
+                ended_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_recent_sessions_ended ON recent_sessions(ended_at);
+
+            -- Short-term memory: Recent activity log
+            CREATE TABLE IF NOT EXISTS recent_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                activity_type TEXT NOT NULL,
+                target TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_recent_activity_created ON recent_activity(created_at);
+            CREATE INDEX IF NOT EXISTS idx_recent_activity_session ON recent_activity(session_id);
+            "#,
+        ).context("Failed to create v2 schema (short-term memory)")?;
 
         Ok(())
     }
@@ -335,12 +443,195 @@ impl MemoryDb {
         Ok(rows)
     }
 
-    /// Reset everything including core memory
+    // === Short-Term Memory Operations ===
+
+    /// Save a session summary when the session ends
+    pub fn save_session_summary(
+        &self,
+        session_id: &str,
+        summary: &str,
+        files_modified: &[String],
+        issues_worked: &[String],
+        started_at: &str,
+    ) -> Result<i64> {
+        let files_str = files_modified.join("\n");
+        let issues_str = issues_worked.join("\n");
+
+        self.conn.execute(
+            r#"INSERT OR REPLACE INTO recent_sessions
+               (session_id, summary, files_modified, issues_worked, started_at, ended_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))"#,
+            params![session_id, summary, files_str, issues_str, started_at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Get recent sessions (within expiry window)
+    pub fn get_recent_sessions(&self, limit: usize) -> Result<Vec<RecentSession>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT id, session_id, summary, files_modified, issues_worked, started_at, ended_at
+               FROM recent_sessions
+               WHERE ended_at > datetime('now', ?1)
+               ORDER BY ended_at DESC
+               LIMIT ?2"#,
+        )?;
+
+        let expiry = format!("-{} hours", SHORT_TERM_EXPIRY_HOURS);
+        let sessions = stmt
+            .query_map(params![expiry, limit as i64], |row| {
+                Ok(RecentSession {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    summary: row.get(2)?,
+                    files_modified: row.get::<_, String>(3)?
+                        .lines()
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect(),
+                    issues_worked: row.get::<_, String>(4)?
+                        .lines()
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect(),
+                    started_at: row.get(5)?,
+                    ended_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(sessions)
+    }
+
+    /// Log an activity (file read, file write, tool call, etc.)
+    pub fn log_activity(
+        &self,
+        session_id: &str,
+        activity_type: &str,
+        target: &str,
+        details: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO recent_activity (session_id, activity_type, target, details) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, activity_type, target, details],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Get recent activities for a session
+    pub fn get_session_activities(&self, session_id: &str) -> Result<Vec<RecentActivity>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT id, session_id, activity_type, target, details, created_at
+               FROM recent_activity
+               WHERE session_id = ?1
+               ORDER BY created_at DESC"#,
+        )?;
+
+        let activities = stmt
+            .query_map(params![session_id], |row| {
+                Ok(RecentActivity {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    activity_type: row.get(2)?,
+                    target: row.get(3)?,
+                    details: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(activities)
+    }
+
+    /// Get unique files modified in a session
+    pub fn get_session_files_modified(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT DISTINCT target FROM recent_activity
+               WHERE session_id = ?1 AND activity_type IN ('file_write', 'file_edit')
+               ORDER BY target"#,
+        )?;
+
+        let files = stmt
+            .query_map(params![session_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+
+        Ok(files)
+    }
+
+    /// Get unique issues worked on in a session
+    pub fn get_session_issues(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT DISTINCT target FROM recent_activity
+               WHERE session_id = ?1 AND activity_type IN ('issue_created', 'issue_closed', 'issue_comment')
+               ORDER BY target"#,
+        )?;
+
+        let issues = stmt
+            .query_map(params![session_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+
+        Ok(issues)
+    }
+
+    /// Clean up expired short-term memory entries
+    pub fn cleanup_expired_short_term(&self) -> Result<(usize, usize)> {
+        let expiry = format!("-{} hours", SHORT_TERM_EXPIRY_HOURS);
+
+        let sessions_deleted = self.conn.execute(
+            "DELETE FROM recent_sessions WHERE ended_at < datetime('now', ?1)",
+            params![expiry],
+        )?;
+
+        let activities_deleted = self.conn.execute(
+            "DELETE FROM recent_activity WHERE created_at < datetime('now', ?1)",
+            params![expiry],
+        )?;
+
+        Ok((sessions_deleted, activities_deleted))
+    }
+
+    /// Format recent sessions for injection into system prompt
+    pub fn format_recent_context_for_prompt(&self) -> Result<String> {
+        let sessions = self.get_recent_sessions(5)?;
+
+        if sessions.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut output = String::from("<recent_sessions>\n");
+        output.push_str("The following sessions occurred recently. Use this context to maintain continuity:\n\n");
+
+        for (i, session) in sessions.iter().enumerate() {
+            output.push_str(&format!("### Session {} (ended {})\n", i + 1, session.ended_at));
+            output.push_str(&session.summary);
+            output.push('\n');
+
+            if !session.files_modified.is_empty() {
+                output.push_str("Files modified: ");
+                output.push_str(&session.files_modified.join(", "));
+                output.push('\n');
+            }
+
+            if !session.issues_worked.is_empty() {
+                output.push_str("Issues worked: ");
+                output.push_str(&session.issues_worked.join(", "));
+                output.push('\n');
+            }
+
+            output.push('\n');
+        }
+
+        output.push_str("</recent_sessions>");
+        Ok(output)
+    }
+
+    /// Reset everything including core memory and short-term memory
     pub fn reset_all(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
             DELETE FROM archival_memory;
             DELETE FROM core_memory;
+            DELETE FROM recent_sessions;
+            DELETE FROM recent_activity;
             INSERT INTO core_memory (section, content) VALUES
                 ('persona', 'I am an AI assistant helping with this project. I will learn about the codebase and remember important details across sessions.'),
                 ('project_info', 'No project information recorded yet.'),
@@ -429,5 +720,83 @@ mod tests {
         assert!(formatted.contains("<core_memory>"));
         assert!(formatted.contains("<persona>"));
         assert!(formatted.contains("</core_memory>"));
+    }
+
+    #[test]
+    fn test_short_term_session_summary() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = MemoryDb::open(&db_path).unwrap();
+
+        // Save a session summary
+        let id = db.save_session_summary(
+            "session-123",
+            "Fixed bug in authentication module",
+            &["src/auth.rs".into(), "src/main.rs".into()],
+            &["#42".into(), "#43".into()],
+            "2024-01-01 10:00:00",
+        ).unwrap();
+        assert!(id > 0);
+
+        // Retrieve recent sessions
+        let sessions = db.get_recent_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "session-123");
+        assert_eq!(sessions[0].files_modified.len(), 2);
+        assert_eq!(sessions[0].issues_worked.len(), 2);
+    }
+
+    #[test]
+    fn test_short_term_activity_logging() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = MemoryDb::open(&db_path).unwrap();
+
+        // Log some activities
+        db.log_activity("session-123", "file_write", "src/lib.rs", Some("Created new module")).unwrap();
+        db.log_activity("session-123", "file_edit", "src/main.rs", None).unwrap();
+        db.log_activity("session-123", "issue_created", "#100", Some("Add feature X")).unwrap();
+
+        // Get activities
+        let activities = db.get_session_activities("session-123").unwrap();
+        assert_eq!(activities.len(), 3);
+
+        // Get files modified
+        let files = db.get_session_files_modified("session-123").unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&"src/lib.rs".to_string()));
+        assert!(files.contains(&"src/main.rs".to_string()));
+
+        // Get issues
+        let issues = db.get_session_issues("session-123").unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0], "#100");
+    }
+
+    #[test]
+    fn test_format_recent_context() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = MemoryDb::open(&db_path).unwrap();
+
+        // Empty at first
+        let empty = db.format_recent_context_for_prompt().unwrap();
+        assert!(empty.is_empty());
+
+        // Add a session
+        db.save_session_summary(
+            "session-1",
+            "Implemented user login",
+            &["src/auth.rs".into()],
+            &["#50".into()],
+            "2024-01-01 10:00:00",
+        ).unwrap();
+
+        let formatted = db.format_recent_context_for_prompt().unwrap();
+        assert!(formatted.contains("<recent_sessions>"));
+        assert!(formatted.contains("Implemented user login"));
+        assert!(formatted.contains("src/auth.rs"));
+        assert!(formatted.contains("#50"));
+        assert!(formatted.contains("</recent_sessions>"));
     }
 }

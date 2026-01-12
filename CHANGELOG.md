@@ -10,6 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix lru crate Stacked Borrows vulnerability by updating to 0.16.3 (#99)
 
 ### Added
+- Add /activity command to show recent session activities (#106)
+- Add automatic database migration for short-term memory tables (#105)
+- Add short-term memory for session continuity across restarts (#100)
 - Add comprehensive README documentation (#98)
 - Add system prompt module for Claudia's core personality (#97)
 - Add web search tool for knowledge retrieval (#92)
@@ -46,6 +49,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Add graceful shutdown and autosave for session memory (#109)
+- Fix short-term memory not persisting even with --stateful flag (#108)
+- Fix short-term memory not persisting across terminal restarts (#107)
+- Track recent file modifications and tool usage (#104)
+- Inject recent session context into new sessions (#103)
+- Auto-save session summary on session end (#102)
+- Add short-term memory database schema and initialization (#101)
 - Add web_browser tool using headless-chrome (#95)
 - Add web_search tool with Tavily/Brave API support (#94)
 - Add web_fetch tool using Jina Reader (#93)

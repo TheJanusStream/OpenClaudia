@@ -497,6 +497,8 @@ enum SlashCommandResult {
     Rename(String),
     /// Memory command with subcommand and args
     Memory(String),
+    /// Activity command to show recent session activities
+    Activity(String),
     /// Show help message (already printed)
     Handled,
 }
@@ -942,6 +944,82 @@ fn export_chat_session(session: &ChatSession) {
     }
 }
 
+/// Save session summary to short-term memory for continuity across restarts
+fn save_session_to_short_term_memory(session: &ChatSession, memory_db: Option<&memory::MemoryDb>) {
+    let db = match memory_db {
+        Some(db) => db,
+        None => return, // Not in stateful mode
+    };
+
+    // Generate summary from session content
+    let mut summary_parts = Vec::new();
+    summary_parts.push(format!("Session: {}", session.title));
+
+    // Extract key user requests and assistant actions
+    let mut user_requests = Vec::new();
+    let mut last_assistant_summary = String::new();
+
+    for msg in &session.messages {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+
+        if role == "user" && !content.is_empty() {
+            // Keep first line of each user message as a request summary
+            if let Some(first_line) = content.lines().next() {
+                let truncated = if first_line.len() > 100 {
+                    format!("{}...", &first_line[..100])
+                } else {
+                    first_line.to_string()
+                };
+                user_requests.push(truncated);
+            }
+        } else if role == "assistant" && !content.is_empty() {
+            // Keep last assistant response summary
+            last_assistant_summary = content.lines().take(3).collect::<Vec<_>>().join(" ");
+            if last_assistant_summary.len() > 200 {
+                last_assistant_summary = format!("{}...", &last_assistant_summary[..200]);
+            }
+        }
+    }
+
+    if !user_requests.is_empty() {
+        summary_parts.push(format!("User requests: {}", user_requests.join("; ")));
+    }
+    if !last_assistant_summary.is_empty() {
+        summary_parts.push(format!("Last action: {}", last_assistant_summary));
+    }
+
+    let summary = summary_parts.join("\n");
+
+    // Get files modified and issues worked from activity log
+    let files_modified = db.get_session_files_modified(&session.id).unwrap_or_default();
+    let issues_worked = db.get_session_issues(&session.id).unwrap_or_default();
+
+    // Save to short-term memory
+    let started_at = session.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
+    match db.save_session_summary(
+        &session.id,
+        &summary,
+        &files_modified,
+        &issues_worked,
+        &started_at,
+    ) {
+        Ok(_) => {
+            tracing::debug!("Session saved to short-term memory");
+        }
+        Err(e) => {
+            tracing::warn!("Failed to save session summary: {}", e);
+        }
+    }
+
+    // Cleanup expired entries
+    if let Ok((sessions, activities)) = db.cleanup_expired_short_term() {
+        if sessions > 0 || activities > 0 {
+            tracing::debug!("Cleaned up {} expired sessions, {} activities", sessions, activities);
+        }
+    }
+}
+
 /// Handle slash commands, returns true if command was handled
 fn handle_slash_command(input: &str, messages: &mut Vec<serde_json::Value>, provider: &str, current_model: &str) -> Option<SlashCommandResult> {
     if !input.starts_with('/') {
@@ -992,6 +1070,12 @@ fn handle_slash_command(input: &str, messages: &mut Vec<serde_json::Value>, prov
             println!("  /memory core     - Show core memory sections");
             println!("  /memory clear    - Clear archival memory (keeps core)");
             println!("  /memory reset    - Reset all memory (with confirmation)");
+            println!();
+            println!("Activity Commands (stateful mode):");
+            println!("  /activity        - Show current session activities");
+            println!("  /activity sessions - Show recent session summaries");
+            println!("  /activity files  - Show files modified this session");
+            println!("  /activity issues - Show issues worked this session");
             println!();
             println!("Shell Commands:");
             println!("  !<cmd>           - Execute shell command (e.g., !ls -la)");
@@ -1230,6 +1314,10 @@ fn handle_slash_command(input: &str, messages: &mut Vec<serde_json::Value>, prov
             // Memory command - pass subcommand to main loop where memory_db is available
             Some(SlashCommandResult::Memory(args.to_string()))
         }
+        "activity" | "act" => {
+            // Activity command - show recent session activities
+            Some(SlashCommandResult::Activity(args.to_string()))
+        }
         _ => {
             eprintln!("Unknown command: /{}. Type /help for available commands.\n", cmd);
             Some(SlashCommandResult::Handled)
@@ -1424,6 +1512,147 @@ fn handle_memory_command(args: &str, memory_db: Option<&memory::MemoryDb>) {
         _ => {
             println!("\nUnknown memory subcommand: {}", subcmd);
             println!("Available: list, search, show, delete, core, clear, reset\n");
+        }
+    }
+}
+
+/// Handle /activity command for viewing recent session activities
+fn handle_activity_command(args: &str, current_session_id: &str, memory_db: Option<&memory::MemoryDb>) {
+    let db = match memory_db {
+        Some(db) => db,
+        None => {
+            println!("\n\x1b[33mActivity tracking requires stateful mode.\x1b[0m");
+            println!("Start with: openclaudia --stateful\n");
+            return;
+        }
+    };
+
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    let subcmd = parts.first().map(|s| s.to_lowercase()).unwrap_or_default();
+    let subargs = parts.get(1).copied().unwrap_or("");
+
+    match subcmd.as_str() {
+        "" | "current" => {
+            // Show activities for current session
+            match db.get_session_activities(current_session_id) {
+                Ok(activities) => {
+                    if activities.is_empty() {
+                        println!("\nNo activities recorded in this session yet.\n");
+                    } else {
+                        println!("\n=== Current Session Activities ({}) ===", activities.len());
+                        println!("Session: {}\n", current_session_id);
+                        for activity in activities.iter().take(20) {
+                            let icon = match activity.activity_type.as_str() {
+                                "file_read" => "📖",
+                                "file_write" => "✏️",
+                                "file_edit" => "📝",
+                                "bash_command" => "💻",
+                                "issue_created" => "🎫",
+                                "issue_closed" => "✅",
+                                "issue_comment" => "💬",
+                                _ => "•",
+                            };
+                            let details = activity.details.as_deref().unwrap_or("");
+                            let details_str = if details.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({})", details)
+                            };
+                            // Use all fields: id, session_id, activity_type, target, details, created_at
+                            println!("  \x1b[90m[{}]\x1b[0m {} \x1b[36m{}\x1b[0m {}{}",
+                                activity.created_at, icon, activity.activity_type, activity.target, details_str);
+                            println!("       \x1b[90mID: {} | Session: {}\x1b[0m", activity.id, &activity.session_id[..8]);
+                        }
+                        if activities.len() > 20 {
+                            println!("\n  ... and {} more activities", activities.len() - 20);
+                        }
+                        println!();
+                    }
+                }
+                Err(e) => eprintln!("\nFailed to get activities: {}\n", e),
+            }
+        }
+        "sessions" | "recent" => {
+            // Show recent sessions with summaries
+            let limit = subargs.parse().unwrap_or(5);
+            match db.get_recent_sessions(limit) {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        println!("\nNo recent sessions recorded.\n");
+                    } else {
+                        println!("\n=== Recent Sessions ({}) ===\n", sessions.len());
+                        for (i, session) in sessions.iter().enumerate() {
+                            // Use session.id field
+                            println!("  \x1b[36m{}.\x1b[0m [ID:{}] Session {} (ended {})",
+                                i + 1, session.id, &session.session_id[..8], session.ended_at);
+                            println!("     Started: {}", session.started_at);
+
+                            // Show summary (first 100 chars)
+                            let summary_preview = if session.summary.len() > 100 {
+                                format!("{}...", &session.summary[..97])
+                            } else {
+                                session.summary.clone()
+                            };
+                            println!("     Summary: {}", summary_preview);
+
+                            if !session.files_modified.is_empty() {
+                                println!("     Files: {}", session.files_modified.join(", "));
+                            }
+                            if !session.issues_worked.is_empty() {
+                                println!("     Issues: {}", session.issues_worked.join(", "));
+                            }
+                            println!();
+                        }
+                    }
+                }
+                Err(e) => eprintln!("\nFailed to get recent sessions: {}\n", e),
+            }
+        }
+        "files" => {
+            // Show files modified in current session
+            match db.get_session_files_modified(current_session_id) {
+                Ok(files) => {
+                    if files.is_empty() {
+                        println!("\nNo files modified in this session yet.\n");
+                    } else {
+                        println!("\n=== Files Modified This Session ({}) ===\n", files.len());
+                        for file in &files {
+                            println!("  📝 {}", file);
+                        }
+                        println!();
+                    }
+                }
+                Err(e) => eprintln!("\nFailed to get modified files: {}\n", e),
+            }
+        }
+        "issues" => {
+            // Show issues worked on in current session
+            match db.get_session_issues(current_session_id) {
+                Ok(issues) => {
+                    if issues.is_empty() {
+                        println!("\nNo issues worked on in this session yet.\n");
+                    } else {
+                        println!("\n=== Issues Worked This Session ({}) ===\n", issues.len());
+                        for issue in &issues {
+                            println!("  🎫 {}", issue);
+                        }
+                        println!();
+                    }
+                }
+                Err(e) => eprintln!("\nFailed to get issues: {}\n", e),
+            }
+        }
+        "help" => {
+            println!("\nActivity Commands:");
+            println!("  /activity          - Show current session activities");
+            println!("  /activity sessions - Show recent session summaries");
+            println!("  /activity files    - Show files modified this session");
+            println!("  /activity issues   - Show issues worked this session");
+            println!();
+        }
+        _ => {
+            println!("\nUnknown activity subcommand: {}", subcmd);
+            println!("Available: current, sessions, files, issues, help\n");
         }
     }
 }
@@ -2007,14 +2236,22 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
     // Initialize chat session
     let mut chat_session = ChatSession::new(&model, &config.proxy.target);
 
-    // Initialize memory database for stateful mode
-    let memory_db: Option<memory::MemoryDb> = if stateful {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match memory::MemoryDb::open_for_project(&cwd) {
-            Ok(db) => {
+    // Initialize memory database
+    // Short-term memory (session summaries, recent activity) is ALWAYS available
+    // Full stateful mode (memory tools, core memory in prompt) requires --stateful flag
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let memory_db: Option<memory::MemoryDb> = match memory::MemoryDb::open_for_project(&cwd) {
+        Ok(db) => {
+            // Show short-term memory status
+            let recent_count = db.get_recent_sessions(10).map(|s| s.len()).unwrap_or(0);
+            if recent_count > 0 {
+                println!("\x1b[90m📝 {} recent session(s) loaded from memory\x1b[0m", recent_count);
+            }
+
+            if stateful {
                 println!("\x1b[35m🧠 Stateful mode enabled\x1b[0m - Memory: {}", db.path().display());
 
-                // Inject core memory into session at start
+                // Inject core memory into session at start (only in full stateful mode)
                 if let Ok(core_memory) = db.format_core_memory_for_prompt() {
                     chat_session.messages.push(serde_json::json!({
                         "role": "system",
@@ -2030,17 +2267,14 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                         )
                     }));
                 }
-
-                Some(db)
             }
-            Err(e) => {
-                eprintln!("\x1b[33mWarning: Failed to initialize memory database: {}\x1b[0m", e);
-                eprintln!("Continuing without stateful memory.\n");
-                None
-            }
+            tracing::debug!("Memory database: {}", db.path().display());
+            Some(db)
         }
-    } else {
-        None
+        Err(e) => {
+            tracing::warn!("Failed to initialize memory database: {}", e);
+            None
+        }
     };
 
     // Initialize permissions cache for sensitive operations
@@ -2083,9 +2317,14 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                 // Handle slash commands
                 if let Some(result) = handle_slash_command(input, &mut chat_session.messages, &config.proxy.target, &model) {
                     match result {
-                        SlashCommandResult::Exit => break,
+                        SlashCommandResult::Exit => {
+                            // Save session to short-term memory before exiting
+                            save_session_to_short_term_memory(&chat_session, memory_db.as_ref());
+                            break;
+                        }
                         SlashCommandResult::Clear => {
-                            // Start a new session
+                            // Save current session before starting new one
+                            save_session_to_short_term_memory(&chat_session, memory_db.as_ref());
                             chat_session = ChatSession::new(&model, &config.proxy.target);
                             continue;
                         }
@@ -2201,6 +2440,10 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                         }
                         SlashCommandResult::Memory(args) => {
                             handle_memory_command(&args, memory_db.as_ref());
+                            continue;
+                        }
+                        SlashCommandResult::Activity(args) => {
+                            handle_activity_command(&args, &chat_session.id, memory_db.as_ref());
                             continue;
                         }
                         SlashCommandResult::Handled => {
@@ -2506,6 +2749,47 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                                         tools::execute_tool(tool_call)
                                     };
 
+                                    // Log activity for short-term memory
+                                    if let Some(ref db) = memory_db {
+                                        let activity_type = match tool_call.function.name.as_str() {
+                                            "read_file" => "file_read",
+                                            "write_file" => "file_write",
+                                            "edit_file" => "file_edit",
+                                            "bash" => "bash_command",
+                                            "chainlink" => {
+                                                // Parse chainlink subcommand
+                                                if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments) {
+                                                    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                                                        if cmd.starts_with("create") { "issue_created" }
+                                                        else if cmd.starts_with("close") { "issue_closed" }
+                                                        else if cmd.starts_with("comment") { "issue_comment" }
+                                                        else { "chainlink" }
+                                                    } else { "chainlink" }
+                                                } else { "chainlink" }
+                                            }
+                                            other => other,
+                                        };
+
+                                        // Extract target from args
+                                        let target = if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments) {
+                                            args.get("path")
+                                                .or_else(|| args.get("file_path"))
+                                                .or_else(|| args.get("command"))
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or(&tool_call.function.name)
+                                                .to_string()
+                                        } else {
+                                            tool_call.function.name.clone()
+                                        };
+
+                                        let _ = db.log_activity(
+                                            &chat_session.id,
+                                            activity_type,
+                                            &target,
+                                            if result.is_error { Some("error") } else { None },
+                                        );
+                                    }
+
                                     // Show result preview
                                     let preview: String = result.content.lines().take(5).collect::<Vec<_>>().join("\n");
                                     if result.is_error {
@@ -2664,11 +2948,14 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                         chat_session.messages.pop();
                     }
                 }
+
+                // Autosave session after each response (protects against terminal close)
+                save_session_to_short_term_memory(&chat_session, memory_db.as_ref());
             }
             Err(ReadlineError::Interrupted) => {
-                // Ctrl+C - just clear the line and continue
-                println!("^C");
-                continue;
+                // Ctrl+C - graceful exit (save session before exiting)
+                println!("\n\x1b[90mInterrupted - saving session...\x1b[0m");
+                break;
             }
             Err(ReadlineError::Eof) => {
                 // Ctrl+D - exit
@@ -2680,6 +2967,9 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
             }
         }
     }
+
+    // Save session to short-term memory on any exit
+    save_session_to_short_term_memory(&chat_session, memory_db.as_ref());
 
     // Save history
     if let Err(e) = rl.save_history(&history_path) {
