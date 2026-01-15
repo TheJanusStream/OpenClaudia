@@ -188,7 +188,7 @@ pub fn get_tool_definitions() -> Value {
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web and return relevant results. Requires TAVILY_API_KEY or BRAVE_API_KEY environment variable to be set. Returns titles, snippets, and URLs.",
+                "description": "Search the web and return relevant results. Uses DuckDuckGo by default (free, no API key). Falls back to Tavily or Brave API if configured. Returns titles, snippets, and URLs.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -933,14 +933,8 @@ fn execute_web_search(args: &HashMap<String, Value>) -> (String, bool) {
         .unwrap_or(5) as usize;
 
     // Load web config from environment
+    // Falls back to DuckDuckGo with headless browser if no API keys configured
     let config = WebConfig::from_env();
-
-    if !config.has_search_provider() {
-        return (
-            "No search API configured. Set TAVILY_API_KEY or BRAVE_API_KEY environment variable.".to_string(),
-            true
-        );
-    }
 
     // Use tokio runtime to execute async function
     let result = match Handle::try_current() {

@@ -2,7 +2,7 @@
 //!
 //! Provides web access capabilities for agents:
 //! - `web_fetch`: Fetch URL content via Jina Reader (free, handles JS/Cloudflare)
-//! - `web_search`: Search the web via Tavily or Brave API (requires API key)
+//! - `web_search`: Search the web via Tavily, Brave API, or DuckDuckGo (headless browser)
 //! - `web_browser`: Full browser automation via headless Chrome (optional feature)
 
 use reqwest::Client;
@@ -18,6 +18,10 @@ const TAVILY_API_URL: &str = "https://api.tavily.com/search";
 /// Brave Search API endpoint
 const BRAVE_SEARCH_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 
+/// DuckDuckGo HTML search endpoint (no API key required)
+#[cfg(feature = "browser")]
+const DUCKDUCKGO_HTML_URL: &str = "https://html.duckduckgo.com/html/";
+
 /// Web configuration for API keys
 #[derive(Debug, Clone, Default)]
 pub struct WebConfig {
@@ -32,11 +36,6 @@ impl WebConfig {
             tavily_api_key: std::env::var("TAVILY_API_KEY").ok(),
             brave_api_key: std::env::var("BRAVE_API_KEY").ok(),
         }
-    }
-
-    /// Check if any search provider is configured
-    pub fn has_search_provider(&self) -> bool {
-        self.tavily_api_key.is_some() || self.brave_api_key.is_some()
     }
 }
 
@@ -131,18 +130,29 @@ struct BraveResult {
     description: String,
 }
 
-/// Search the web using configured provider (Tavily or Brave)
+/// Search the web using DuckDuckGo (default) or configured API provider
 pub async fn search_web(query: &str, config: &WebConfig, limit: usize) -> Result<Vec<SearchResult>, String> {
-    // Try Tavily first, then Brave
+    // Try DuckDuckGo first (free, no API key required)
+    // Fall back to paid APIs only if DDG fails or browser feature disabled
+    let ddg_error = match search_duckduckgo(query, limit) {
+        Ok(results) => return Ok(results),
+        Err(e) => {
+            tracing::warn!("DuckDuckGo search failed: {}", e);
+            e
+        }
+    };
+
+    // Fall back to Tavily if configured
     if let Some(api_key) = &config.tavily_api_key {
         return search_tavily(query, api_key, limit).await;
     }
 
+    // Fall back to Brave if configured
     if let Some(api_key) = &config.brave_api_key {
         return search_brave(query, api_key, limit).await;
     }
 
-    Err("No search API configured. Set TAVILY_API_KEY or BRAVE_API_KEY environment variable.".to_string())
+    Err(format!("Web search failed. DuckDuckGo error: {}. No fallback API keys configured (TAVILY_API_KEY or BRAVE_API_KEY).", ddg_error))
 }
 
 /// Search using Tavily API
@@ -236,6 +246,119 @@ async fn search_brave(query: &str, api_key: &str, limit: usize) -> Result<Vec<Se
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Search DuckDuckGo using headless Chrome browser
+///
+/// No API key required - scrapes the HTML search results page
+#[cfg(feature = "browser")]
+pub fn search_duckduckgo(query: &str, limit: usize) -> Result<Vec<SearchResult>, String> {
+    use headless_chrome::{Browser, LaunchOptions};
+    use scraper::{Html, Selector};
+
+    let browser = Browser::new(
+        LaunchOptions::default_builder()
+            .headless(true)
+            .build()
+            .map_err(|e| format!("Failed to configure browser: {}", e))?,
+    )
+    .map_err(|e| format!("Failed to launch browser: {}", e))?;
+
+    let tab = browser
+        .new_tab()
+        .map_err(|e| format!("Failed to create browser tab: {}", e))?;
+
+    // Navigate to DuckDuckGo HTML search
+    let search_url = format!("{}?q={}", DUCKDUCKGO_HTML_URL, urlencoding::encode(query));
+
+    tab.navigate_to(&search_url)
+        .map_err(|e| format!("Failed to navigate to DuckDuckGo: {}", e))?;
+
+    tab.wait_until_navigated()
+        .map_err(|e| format!("Navigation timeout: {}", e))?;
+
+    // Wait for page to load
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Get page HTML
+    let html = tab
+        .get_content()
+        .map_err(|e| format!("Failed to get page content: {}", e))?;
+
+    // Parse HTML and extract results
+    let document = Html::parse_document(&html);
+
+    // DDG HTML selectors
+    let result_selector = Selector::parse(".result").map_err(|e| format!("Invalid selector: {:?}", e))?;
+    let title_selector = Selector::parse(".result__a").map_err(|e| format!("Invalid selector: {:?}", e))?;
+    let snippet_selector = Selector::parse(".result__snippet").map_err(|e| format!("Invalid selector: {:?}", e))?;
+
+    let mut results = Vec::new();
+
+    for result_element in document.select(&result_selector).take(limit) {
+        // Get title and URL from the link
+        if let Some(title_element) = result_element.select(&title_selector).next() {
+            let title = title_element.text().collect::<String>().trim().to_string();
+
+            // Get URL from href attribute - DDG wraps URLs in a redirect
+            let url = title_element
+                .value()
+                .attr("href")
+                .map(|href| {
+                    // DDG HTML uses direct URLs or //duckduckgo.com/l/?uddg=<encoded_url>
+                    if href.starts_with("//duckduckgo.com/l/") {
+                        // Extract the actual URL from the redirect
+                        if let Some(uddg_start) = href.find("uddg=") {
+                            let encoded = &href[uddg_start + 5..];
+                            // Find end of URL (next & or end of string)
+                            let end = encoded.find('&').unwrap_or(encoded.len());
+                            urlencoding::decode(&encoded[..end])
+                                .map(|s| s.into_owned())
+                                .unwrap_or_else(|_| href.to_string())
+                        } else {
+                            href.to_string()
+                        }
+                    } else if href.starts_with("http") {
+                        href.to_string()
+                    } else {
+                        format!("https:{}", href)
+                    }
+                })
+                .unwrap_or_default();
+
+            // Skip if no valid URL
+            if url.is_empty() || !url.starts_with("http") {
+                continue;
+            }
+
+            // Get snippet
+            let snippet = result_element
+                .select(&snippet_selector)
+                .next()
+                .map(|el| el.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+
+            // Skip results without meaningful content
+            if !title.is_empty() {
+                results.push(SearchResult {
+                    title,
+                    url,
+                    snippet,
+                });
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Err("No search results found. DuckDuckGo may have changed their HTML structure.".to_string());
+    }
+
+    Ok(results)
+}
+
+#[cfg(not(feature = "browser"))]
+pub fn search_duckduckgo(_query: &str, _limit: usize) -> Result<Vec<SearchResult>, String> {
+    Err("DuckDuckGo search requires the browser feature. Rebuild with `cargo build --features browser` or set TAVILY_API_KEY/BRAVE_API_KEY.".to_string())
 }
 
 /// Fetch URL using headless Chrome browser

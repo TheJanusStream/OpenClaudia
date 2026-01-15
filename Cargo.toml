@@ -74,10 +74,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Headless browser for web scraping (optional, heavy dependency)
 headless_chrome = { version = "1", optional = true }
+scraper = { version = "0.20", optional = true }
 
 [features]
-default = []
-browser = ["headless_chrome"]
+default = ["browser"]
+browser = ["headless_chrome", "scraper"]
 
 [dev-dependencies]
 tempfile = "3"

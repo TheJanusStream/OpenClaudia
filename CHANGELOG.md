@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix lru crate Stacked Borrows vulnerability by updating to 0.16.3 (#99)
 
 ### Added
+- Add WebSearch tool using DuckDuckGo and headless browser (#131)
 - Emulate Claude Code native tool format for OAuth requests (#125)
 - Add auth command for direct Claude Max OAuth login (#124)
 - Update available models list to current 2025-2026 models (#123)
@@ -45,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add hook engine with all 12 event types (#4)
 
 ### Fixed
+- Clean up unused code and fix compiler warnings (#84)
 - Fix bash tool to use Git Bash instead of WSL on Windows (#90)
 - Update dependencies to fix net2 deprecation warning (#22)
 - Fix bash tool to use PowerShell on Windows for better command compatibility (#70)
@@ -54,6 +56,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Add automatic OAuth flow when starting OpenClaudia with Anthropic provider (#127)
 - Add automatic OAuth flow when starting OpenClaudia with Anthropic provider (#127)
 - Add Claude Code system prompt injection for OAuth requests (#122)
 - Add OAuth token refresh and proxy integration (#121)
