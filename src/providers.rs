@@ -128,17 +128,28 @@ impl AnthropicAdapter {
             .collect()
     }
 
-    /// Convert OpenAI tools to Anthropic format
-    fn convert_tools(tools: &[Value]) -> Vec<Value> {
+    /// Convert OpenAI tools to Anthropic format with optional prompt caching
+    /// If cache_last is true, adds cache_control to the last tool for prompt caching
+    fn convert_tools(tools: &[Value], cache_last: bool) -> Vec<Value> {
+        let len = tools.len();
         tools
             .iter()
-            .filter_map(|tool| {
+            .enumerate()
+            .filter_map(|(i, tool)| {
                 let func = tool.get("function")?;
-                Some(json!({
+                let mut tool_def = json!({
                     "name": func.get("name")?,
                     "description": func.get("description").unwrap_or(&json!("")),
                     "input_schema": func.get("parameters").unwrap_or(&json!({}))
-                }))
+                });
+
+                // Add cache_control to the last tool for prompt caching
+                // This caches all tools since cache applies to everything before the marker
+                if cache_last && i == len - 1 {
+                    tool_def["cache_control"] = json!({"type": "ephemeral"});
+                }
+
+                Some(tool_def)
             })
             .collect()
     }
@@ -163,9 +174,16 @@ impl ProviderAdapter for AnthropicAdapter {
             "max_tokens": request.max_tokens.unwrap_or(4096)
         });
 
-        // Add system message if present
+        // Add system message if present - use array format with cache_control for prompt caching
+        // See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
         if let Some(system) = Self::extract_system(&request.messages) {
-            body["system"] = json!(system);
+            body["system"] = json!([
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]);
         }
 
         // Add temperature if specified
@@ -173,9 +191,9 @@ impl ProviderAdapter for AnthropicAdapter {
             body["temperature"] = json!(temp);
         }
 
-        // Convert tools
+        // Convert tools with cache_control on last tool for prompt caching
         if let Some(tools) = &request.tools {
-            let converted = Self::convert_tools(tools);
+            let converted = Self::convert_tools(tools, true);
             if !converted.is_empty() {
                 body["tools"] = json!(converted);
             }
@@ -1045,11 +1063,17 @@ mod tests {
         let result = adapter.transform_request(&request).unwrap();
 
         assert_eq!(result["model"], "gpt-4");
-        assert_eq!(result["system"], "You are helpful.");
         assert_eq!(result["max_tokens"], 1000);
         // Float comparison with tolerance
         let temp = result["temperature"].as_f64().unwrap();
         assert!((temp - 0.7).abs() < 0.01);
+
+        // System should be array format with cache_control for prompt caching
+        let system = result["system"].as_array().unwrap();
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["text"], "You are helpful.");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
 
         // Messages should not include system
         let messages = result["messages"].as_array().unwrap();
@@ -1073,6 +1097,42 @@ mod tests {
         assert_eq!(result["object"], "chat.completion");
         assert_eq!(result["choices"][0]["message"]["content"], "Hello!");
         assert_eq!(result["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn test_anthropic_tool_caching() {
+        // Test that tools have cache_control on the last tool
+        let adapter = AnthropicAdapter::new();
+        let mut request = create_test_request();
+        request.tools = Some(vec![
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "tool1",
+                    "description": "First tool",
+                    "parameters": {}
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "tool2",
+                    "description": "Second tool",
+                    "parameters": {}
+                }
+            }),
+        ]);
+
+        let result = adapter.transform_request(&request).unwrap();
+        let tools = result["tools"].as_array().unwrap();
+
+        assert_eq!(tools.len(), 2);
+
+        // First tool should NOT have cache_control
+        assert!(tools[0].get("cache_control").is_none());
+
+        // Last tool SHOULD have cache_control for prompt caching
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]

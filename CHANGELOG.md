@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix lru crate Stacked Borrows vulnerability by updating to 0.16.3 (#99)
 
 ### Added
+- Add Anthropic prompt caching for system prompt and tools (#144)
 - Add generic OpenAI-compatible local LLM support (LM Studio, LocalAI, etc) (#141)
 - Add Ollama provider support for local LLM inference (#140)
 - Add end-to-end integration test framework for all tools (#133)
@@ -59,6 +60,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Fix missing bash_output and kill_shell tool definitions in get_tool_definitions (#143)
 - Update README with new features (web search, background shells, memory, offset/limit) (#142)
 - Add offset and limit parameters to read_file tool (#139)
 - Add E2E tests for memory tools (#138)

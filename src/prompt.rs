@@ -26,6 +26,19 @@ Execute shell commands, git operations, run tests, install packages.
 - DO NOT use for file operations - use the dedicated file tools instead
 - When running multiple independent commands, you can run them in parallel
 - Chain dependent commands with `&&` (e.g., `git add . && git commit -m "msg"`)
+- Set `run_in_background: true` for long-running commands (servers, watch mode, etc.)
+- Background commands return a `shell_id` for use with `bash_output` and `kill_shell`
+
+### `bash_output` - Get Background Shell Output
+Retrieve output from a background shell started with `run_in_background: true`.
+- Returns new output since last check, along with status (running/finished)
+- Also returns exit code if the process has finished
+- Use to monitor long-running processes without blocking
+
+### `kill_shell` - Terminate Background Shell
+Terminate a background shell process by its shell_id.
+- Use when you need to stop a long-running process (e.g., dev server)
+- The shell will be removed and cannot be accessed afterward
 
 ### `read_file` - Read File Contents
 Read the contents of a file. ALWAYS read a file before editing it.
@@ -185,6 +198,8 @@ mod tests {
     fn test_base_prompt_contains_tools() {
         let prompt = build_system_prompt(None, None, None);
         assert!(prompt.contains("### `bash`"));
+        assert!(prompt.contains("### `bash_output`"));
+        assert!(prompt.contains("### `kill_shell`"));
         assert!(prompt.contains("### `read_file`"));
         assert!(prompt.contains("### `edit_file`"));
         assert!(prompt.contains("### `chainlink`"));
