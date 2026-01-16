@@ -12,7 +12,9 @@
 //! - memory_update: Update existing memory
 //! - core_memory_update: Update core memory sections
 //!
+use crate::config::AppConfig;
 use crate::memory::{MemoryDb, SECTION_PERSONA, SECTION_PROJECT_INFO, SECTION_USER_PREFS};
+use crate::subagent;
 use crate::web::{self, WebConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1068,8 +1070,8 @@ pub fn get_memory_tool_definitions() -> Value {
     ])
 }
 
-/// Get all tool definitions, optionally including memory tools
-pub fn get_all_tool_definitions(stateful: bool) -> Value {
+/// Get all tool definitions, optionally including memory and subagent tools
+pub fn get_all_tool_definitions(stateful: bool, subagents: bool) -> Value {
     let mut tools = get_tool_definitions();
 
     if stateful {
@@ -1078,6 +1080,17 @@ pub fn get_all_tool_definitions(stateful: bool) -> Value {
             get_memory_tool_definitions().as_array().cloned(),
         ) {
             base_arr.extend(memory_arr);
+        }
+    }
+
+    if subagents {
+        if let (Some(base_arr), Some(subagent_arr)) = (
+            tools.as_array_mut(),
+            subagent::get_subagent_tool_definitions()
+                .as_array()
+                .cloned(),
+        ) {
+            base_arr.extend(subagent_arr);
         }
     }
 
@@ -1147,7 +1160,50 @@ pub fn execute_tool_with_memory(tool_call: &ToolCall, memory_db: Option<&MemoryD
         "web_search" => execute_web_search(&args),
         "web_browser" => execute_web_browser(&args),
 
+        // Subagent tools (require config - return error if called without it)
+        "task" | "agent_output" => (
+            "Subagent tools require configuration context. Use execute_tool_full() instead."
+                .to_string(),
+            true,
+        ),
+
         _ => (format!("Unknown tool: {}", tool_call.function.name), true),
+    };
+
+    ToolResult {
+        tool_call_id: tool_call.id.clone(),
+        content,
+        is_error,
+    }
+}
+
+/// Execute a tool call with full context (memory + config for subagents)
+pub fn execute_tool_full(
+    tool_call: &ToolCall,
+    memory_db: Option<&MemoryDb>,
+    app_config: Option<&AppConfig>,
+) -> ToolResult {
+    let args: HashMap<String, Value> =
+        serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
+
+    // Check for subagent tools first (they need config)
+    let (content, is_error) = match tool_call.function.name.as_str() {
+        "task" => {
+            if let Some(config) = app_config {
+                subagent::execute_task_tool(&args, config)
+            } else {
+                (
+                    "Task tool requires application configuration".to_string(),
+                    true,
+                )
+            }
+        }
+        "agent_output" => subagent::execute_agent_output_tool(&args),
+        // For all other tools, delegate to the existing function
+        _ => {
+            let result = execute_tool_with_memory(tool_call, memory_db);
+            return result;
+        }
     };
 
     ToolResult {

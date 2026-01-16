@@ -18,6 +18,7 @@ pub mod providers;
 pub mod proxy;
 pub mod rules;
 pub mod session;
+pub mod subagent;
 pub mod tools;
 pub mod tui;
 pub mod web;

@@ -3156,7 +3156,7 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                         .collect();
 
                     // Get tools in OpenAI format and convert to Anthropic format
-                    let openai_tools = tools::get_all_tool_definitions(stateful);
+                    let openai_tools = tools::get_all_tool_definitions(stateful, true);
                     let anthropic_tools =
                         convert_tools_to_anthropic(openai_tools.as_array().unwrap_or(&vec![]));
 
@@ -3185,7 +3185,7 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                         "messages": chat_session.messages,
                         "max_tokens": 4096,
                         "stream": true,
-                        "tools": tools::get_all_tool_definitions(stateful)
+                        "tools": tools::get_all_tool_definitions(stateful, true)
                     })
                 };
 
@@ -3556,7 +3556,7 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                                         "messages": chat_session.messages,
                                         "max_tokens": 4096,
                                         "stream": true,
-                                        "tools": tools::get_all_tool_definitions(stateful)
+                                        "tools": tools::get_all_tool_definitions(stateful, true)
                                     })
                                 };
 

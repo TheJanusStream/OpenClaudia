@@ -1401,8 +1401,8 @@ mod tool_definitions {
 
     #[test]
     fn test_get_all_tool_definitions_includes_memory() {
-        // Without stateful flag
-        let tools_no_memory = get_all_tool_definitions(false);
+        // Without stateful flag, without subagents
+        let tools_no_memory = get_all_tool_definitions(false, false);
         let no_memory_names: Vec<&str> = tools_no_memory
             .as_array()
             .unwrap()
@@ -1411,7 +1411,7 @@ mod tool_definitions {
             .collect();
 
         // With stateful flag
-        let tools_with_memory = get_all_tool_definitions(true);
+        let tools_with_memory = get_all_tool_definitions(true, false);
         let with_memory_names: Vec<&str> = tools_with_memory
             .as_array()
             .unwrap()

@@ -79,6 +79,31 @@ Track tasks, issues, and work items for the project.
 - Close issues when work is complete
 - Use to maintain context across sessions
 
+### `task` - Spawn Autonomous Subagents
+Launch a specialized subagent to handle complex tasks autonomously.
+- Subagents run with their own isolated conversation context
+- Each subagent type has specific capabilities and tools available:
+  - `general-purpose`: Complex multi-step tasks, code modifications (all tools)
+  - `explore`: Fast codebase searches and exploration (read-only tools)
+  - `plan`: Design implementation strategies and architecture (read-only)
+  - `guide`: Documentation lookup and information retrieval
+- Parameters:
+  - `description`: Short 3-5 word task description
+  - `prompt`: Detailed instructions for the subagent
+  - `subagent_type`: One of "general-purpose", "explore", "plan", "guide"
+  - `run_in_background`: If true, returns agent_id immediately (default: false)
+- Use `run_in_background: true` for long tasks you want to run while doing other work
+- Subagents return a summary when complete
+
+### `agent_output` - Get Subagent Results
+Retrieve results from a background subagent.
+- Parameters:
+  - `agent_id`: The ID returned from a `task` call with `run_in_background: true`
+  - `block`: If true, wait for completion (up to 5 minutes). Default: false
+- If called without agent_id, lists all running/completed agents
+- Returns current status if agent is still running
+- Returns final output and turn count when agent is finished
+
 ## Working Principles
 
 ### Read Before Write (CRITICAL)
@@ -203,6 +228,8 @@ mod tests {
         assert!(prompt.contains("### `read_file`"));
         assert!(prompt.contains("### `edit_file`"));
         assert!(prompt.contains("### `chainlink`"));
+        assert!(prompt.contains("### `task`"));
+        assert!(prompt.contains("### `agent_output`"));
     }
 
     #[test]
