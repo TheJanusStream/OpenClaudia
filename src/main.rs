@@ -2434,7 +2434,7 @@ async fn start_builtin_oauth_flow(config: &config::AppConfig) -> Option<OAuthFlo
 /// Interactive chat mode (default command)
 async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Result<()> {
     use openclaudia::hooks::{load_claude_code_hooks, merge_hooks_config, HookEngine, HookEvent, HookInput};
-    use openclaudia::providers::get_adapter;
+    use openclaudia::providers::{get_adapter, convert_tools_to_anthropic};
     use openclaudia::rules::RulesEngine;
     use indicatif::{ProgressBar, ProgressStyle};
     use rustyline::error::ReadlineError;
@@ -2949,7 +2949,63 @@ async fn cmd_chat(model_override: Option<String>, stateful: bool) -> anyhow::Res
                     }
 
                     req
+                } else if config.proxy.target == "anthropic" {
+                    // Anthropic direct API mode - need proper Anthropic format
+                    // Extract system message to top-level (Anthropic API requirement)
+                    let system_msg = chat_session.messages.iter()
+                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                        .map(String::from);
+
+                    // Filter out system messages and convert to Anthropic format
+                    let anthropic_messages: Vec<serde_json::Value> = chat_session.messages.iter()
+                        .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+                        .map(|m| {
+                            let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                            let content = m.get("content")
+                                .map(|c| {
+                                    if c.is_string() {
+                                        // Convert string content to Anthropic array format
+                                        serde_json::json!([{"type": "text", "text": c.as_str().unwrap_or("")}])
+                                    } else {
+                                        // Already array format, keep as-is
+                                        c.clone()
+                                    }
+                                })
+                                .unwrap_or_else(|| serde_json::json!([{"type": "text", "text": ""}]));
+                            serde_json::json!({
+                                "role": role,
+                                "content": content
+                            })
+                        })
+                        .collect();
+
+                    // Get tools in OpenAI format and convert to Anthropic format
+                    let openai_tools = tools::get_all_tool_definitions(stateful);
+                    let anthropic_tools = convert_tools_to_anthropic(
+                        openai_tools.as_array().unwrap_or(&vec![])
+                    );
+
+                    let mut req = serde_json::json!({
+                        "model": model,
+                        "messages": anthropic_messages,
+                        "max_tokens": 4096,
+                        "stream": true,
+                        "tools": anthropic_tools
+                    });
+
+                    // Add system as top-level parameter with cache_control for prompt caching
+                    if let Some(sys) = system_msg {
+                        req["system"] = serde_json::json!([{
+                            "type": "text",
+                            "text": sys,
+                            "cache_control": {"type": "ephemeral"}
+                        }]);
+                    }
+
+                    req
                 } else {
+                    // OpenAI-compatible format for other providers
                     serde_json::json!({
                         "model": model,
                         "messages": chat_session.messages,

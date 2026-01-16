@@ -60,6 +60,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fix TUI welcome screen box drawing alignment (#59)
 
 ### Changed
+- Fix Anthropic tool format - use native tool types instead of function format (#151)
 - Fix missing bash_output and kill_shell tool definitions in get_tool_definitions (#143)
 - Update README with new features (web search, background shells, memory, offset/limit) (#142)
 - Add offset and limit parameters to read_file tool (#139)

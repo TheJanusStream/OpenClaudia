@@ -155,6 +155,14 @@ impl AnthropicAdapter {
     }
 }
 
+/// Convert tools from OpenAI format to Anthropic format
+///
+/// OpenAI format: `{ "type": "function", "function": { "name": ..., "parameters": ... } }`
+/// Anthropic format: `{ "name": ..., "description": ..., "input_schema": ... }`
+pub fn convert_tools_to_anthropic(tools: &[Value]) -> Vec<Value> {
+    AnthropicAdapter::convert_tools(tools, true)
+}
+
 impl Default for AnthropicAdapter {
     fn default() -> Self {
         Self::new()
