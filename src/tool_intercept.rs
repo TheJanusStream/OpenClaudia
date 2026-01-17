@@ -28,10 +28,10 @@ impl InterceptedToolCall {
         let name_lower = self.name.to_lowercase();
         let internal_name = match name_lower.as_str() {
             "bash" => "bash",
-            "read" => "read_file",
-            "write" => "write_file",
-            "edit" => "edit_file",
-            "glob" => "glob",
+            "read" | "read_file" => "read_file",
+            "write" | "write_file" => "write_file",
+            "edit" | "edit_file" => "edit_file",
+            "glob" | "list_files" => "list_files", // Our internal name is list_files
             "grep" => "grep",
             "webfetch" | "web_fetch" => "web_fetch",
             "websearch" | "web_search" => "web_search",
@@ -47,9 +47,20 @@ impl InterceptedToolCall {
                 ("read", "path") => "path",
                 ("write", "file_path") => "path",
                 ("write", "content") => "content",
+                ("write", "contents") => "content", // Claude sometimes uses plural
+                ("write_file", "file_path") => "path",
+                ("write_file", "path") => "path",
+                ("write_file", "content") => "content",
+                ("write_file", "contents") => "content", // Claude sometimes uses plural
                 ("edit", "file_path") => "path",
                 ("edit", "old_string") => "old_string",
                 ("edit", "new_string") => "new_string",
+                ("edit_file", "file_path") => "path",
+                ("edit_file", "path") => "path",
+                ("edit_file", "old_string") => "old_string",
+                ("edit_file", "new_string") => "new_string",
+                ("read_file", "file_path") => "path",
+                ("read_file", "path") => "path",
                 ("glob", "pattern") => "pattern",
                 ("glob", "path") => "path",
                 ("grep", "pattern") => "pattern",
@@ -108,28 +119,55 @@ impl ToolInterceptor {
         self.in_function_calls = false;
     }
 
+    /// Shorthand tool tags that Claude might use (e.g., <bash>cmd</bash>)
+    const SHORTHAND_TOOLS: &'static [&'static str] = &[
+        "bash", "read", "write", "edit", "glob", "grep", "read_file", "write_file", "edit_file",
+    ];
+
     /// Check if buffer contains tool invocations
-    /// Claude Code uses direct <invoke> tags (not wrapped in <function_calls>)
+    /// Claude Code uses multiple formats:
+    /// 1. <invoke name="Bash"><parameter name="command">...</parameter></invoke>
+    /// 2. <bash>...</bash> (shorthand)
+    /// 3. <function_calls><invoke>...</invoke></function_calls>
     pub fn has_pending_tool_calls(&self) -> bool {
-        const INVOKE_OPEN: &str = "<invoke name=\"";
-        self.buffer.contains(INVOKE_OPEN) || self.in_function_calls
+        // Check for full invoke format
+        if self.buffer.contains("<invoke name=\"") {
+            return true;
+        }
+        // Check for shorthand format like <bash>, <read>, etc.
+        for tool in Self::SHORTHAND_TOOLS {
+            let open_tag = format!("<{}>", tool);
+            let open_tag_with_attr = format!("<{} ", tool); // <write path="...">
+            if self.buffer.contains(&open_tag) || self.buffer.contains(&open_tag_with_attr) {
+                return true;
+            }
+        }
+        self.in_function_calls
     }
 
-    /// Check if we have a complete invoke block (invoke + result or just invoke closed)
+    /// Check if we have a complete tool block
     pub fn has_complete_block(&self) -> bool {
-        const INVOKE_OPEN: &str = "<invoke name=\"";
-        const INVOKE_CLOSE: &str = "</invoke>";
-
-        // Look for complete <invoke>...</invoke> blocks
-        if let Some(start) = self.buffer.find(INVOKE_OPEN) {
-            if let Some(end) = self.buffer[start..].find(INVOKE_CLOSE) {
-                // Check if there's a <result> after this invoke
-                let invoke_end = start + end + INVOKE_CLOSE.len();
+        // Check for full invoke format
+        if let Some(start) = self.buffer.find("<invoke name=\"") {
+            if let Some(end) = self.buffer[start..].find("</invoke>") {
+                let invoke_end = start + end + "</invoke>".len();
                 let after = &self.buffer[invoke_end..];
-                // If there's a result, wait for it to complete
                 if after.trim_start().starts_with("<result>") {
                     return after.contains("</result>");
                 }
+                return true;
+            }
+        }
+        // Check for shorthand format
+        for tool in Self::SHORTHAND_TOOLS {
+            let open_tag = format!("<{}>", tool);
+            let open_tag_with_attr = format!("<{} ", tool);
+            let close_tag = format!("</{}>", tool);
+
+            let has_open = self.buffer.contains(&open_tag) || self.buffer.contains(&open_tag_with_attr);
+            let has_close = self.buffer.contains(&close_tag);
+
+            if has_open && has_close {
                 return true;
             }
         }
@@ -140,20 +178,29 @@ impl ToolInterceptor {
     /// Returns extracted tool calls and the text content before/after the block
     /// NOTE: This also strips out <result> blocks (sandbox output we're replacing)
     pub fn extract_tool_calls(&mut self) -> (Vec<InterceptedToolCall>, String, String) {
+        // Try full invoke format first
+        if let Some(result) = self.try_extract_invoke_format() {
+            return result;
+        }
+
+        // Try shorthand format (e.g., <bash>cmd</bash>)
+        if let Some(result) = self.try_extract_shorthand_format() {
+            return result;
+        }
+
+        // No tool calls found
+        (vec![], self.buffer.clone(), String::new())
+    }
+
+    /// Try to extract tool calls in <invoke name="..."> format
+    fn try_extract_invoke_format(&mut self) -> Option<(Vec<InterceptedToolCall>, String, String)> {
         const INVOKE_OPEN: &str = "<invoke name=\"";
         const INVOKE_CLOSE: &str = "</invoke>";
         const RESULT_OPEN: &str = "<result>";
         const RESULT_CLOSE: &str = "</result>";
 
-        // Find first invoke block
-        let Some(start_idx) = self.buffer.find(INVOKE_OPEN) else {
-            return (vec![], self.buffer.clone(), String::new());
-        };
-
-        // Find end of invoke block
-        let Some(invoke_end_rel) = self.buffer[start_idx..].find(INVOKE_CLOSE) else {
-            return (vec![], self.buffer.clone(), String::new());
-        };
+        let start_idx = self.buffer.find(INVOKE_OPEN)?;
+        let invoke_end_rel = self.buffer[start_idx..].find(INVOKE_CLOSE)?;
         let invoke_end = start_idx + invoke_end_rel + INVOKE_CLOSE.len();
 
         // Check if there's a <result> block to skip
@@ -173,11 +220,131 @@ impl ToolInterceptor {
         let invoke_block = &self.buffer[start_idx..invoke_end];
 
         let tools = self.parse_invocations(invoke_block);
-
-        // Clear buffer and store remainder
         self.buffer = after.clone();
 
-        (tools, before, after)
+        Some((tools, before, after))
+    }
+
+    /// Try to extract tool calls in shorthand format (e.g., <bash>cmd</bash>)
+    fn try_extract_shorthand_format(&mut self) -> Option<(Vec<InterceptedToolCall>, String, String)> {
+        // Find the first shorthand tool tag
+        let mut earliest_match: Option<(usize, &str)> = None;
+
+        for tool in Self::SHORTHAND_TOOLS {
+            let open_tag = format!("<{}>", tool);
+            let open_tag_attr = format!("<{} ", tool);
+
+            // Check for <tool> or <tool attr="...">
+            if let Some(idx) = self.buffer.find(&open_tag) {
+                if earliest_match.is_none() || idx < earliest_match.unwrap().0 {
+                    earliest_match = Some((idx, *tool));
+                }
+            }
+            if let Some(idx) = self.buffer.find(&open_tag_attr) {
+                if earliest_match.is_none() || idx < earliest_match.unwrap().0 {
+                    earliest_match = Some((idx, *tool));
+                }
+            }
+        }
+
+        let (start_idx, tool_name) = earliest_match?;
+        let close_tag = format!("</{}>", tool_name);
+        let close_idx = self.buffer[start_idx..].find(&close_tag)?;
+        let block_end = start_idx + close_idx + close_tag.len();
+
+        // Extract the content between tags
+        let tag_content = &self.buffer[start_idx..block_end];
+
+        // Parse the shorthand tag
+        let tool = self.parse_shorthand_tag(tool_name, tag_content)?;
+
+        let before = self.buffer[..start_idx].to_string();
+        let after = self.buffer[block_end..].to_string();
+        self.buffer = after.clone();
+
+        Some((vec![tool], before, after))
+    }
+
+    /// Parse a shorthand tool tag like <bash>command</bash> or <write path="file">content</write>
+    fn parse_shorthand_tag(&self, tool_name: &str, tag_content: &str) -> Option<InterceptedToolCall> {
+        let open_simple = format!("<{}>", tool_name);
+        let open_attr = format!("<{} ", tool_name);
+        let close_tag = format!("</{}>", tool_name);
+
+        let mut parameters = HashMap::new();
+
+        // Check if it's a simple tag <tool>content</tool> or has attributes <tool attr="val">content</tool>
+        let content_start = if tag_content.starts_with(&open_simple) {
+            open_simple.len()
+        } else if tag_content.starts_with(&open_attr) {
+            // Parse attributes from <tool attr="val" attr2="val2">
+            let close_bracket = tag_content.find('>')?;
+            let attr_str = &tag_content[open_attr.len()..close_bracket];
+
+            // Simple attribute parsing: attr="value"
+            let mut attr_search = 0;
+            while let Some(eq_pos) = attr_str[attr_search..].find('=') {
+                let abs_eq = attr_search + eq_pos;
+                let attr_name = attr_str[attr_search..abs_eq].trim();
+
+                // Find quoted value
+                let quote_start = attr_str[abs_eq..].find('"')? + abs_eq + 1;
+                let quote_end = attr_str[quote_start..].find('"')? + quote_start;
+                let attr_value = &attr_str[quote_start..quote_end];
+
+                parameters.insert(attr_name.to_string(), attr_value.to_string());
+                attr_search = quote_end + 1;
+            }
+
+            close_bracket + 1
+        } else {
+            return None;
+        };
+
+        // Extract content between open and close tags
+        let content_end = tag_content.len() - close_tag.len();
+        let content = tag_content[content_start..content_end].to_string();
+
+        // Map shorthand content to appropriate parameter
+        match tool_name {
+            "bash" => {
+                parameters.insert("command".to_string(), content);
+            }
+            "read" | "read_file" => {
+                if !parameters.contains_key("path") && !parameters.contains_key("file_path") {
+                    parameters.insert("path".to_string(), content);
+                }
+            }
+            "write" | "write_file" => {
+                // Content is the file content, path should be in attributes
+                if !content.is_empty() {
+                    parameters.insert("content".to_string(), content);
+                }
+            }
+            "edit" | "edit_file" => {
+                // Content might be used for something, but usually params are in attributes
+            }
+            "glob" => {
+                if !parameters.contains_key("pattern") {
+                    parameters.insert("pattern".to_string(), content);
+                }
+            }
+            "grep" => {
+                if !parameters.contains_key("pattern") {
+                    parameters.insert("pattern".to_string(), content);
+                }
+            }
+            _ => {}
+        }
+
+        Some(InterceptedToolCall {
+            name: tool_name.to_string(),
+            parameters,
+            id: format!(
+                "toolu_{}",
+                Uuid::new_v4().to_string().replace("-", "")[..24].to_string()
+            ),
+        })
     }
 
     /// Parse invoke tags within a function_calls block
@@ -433,5 +600,61 @@ Some text after."#;
         let tc = tool.to_tool_call();
         assert_eq!(tc.function.name, "bash");
         assert!(tc.function.arguments.contains("echo hello"));
+    }
+
+    #[test]
+    fn test_parse_shorthand_bash() {
+        let mut interceptor = ToolInterceptor::new();
+
+        // Shorthand format Claude sometimes uses: <bash>command</bash>
+        let content = r#"I'll check the directory.
+
+<bash>pwd</bash>
+
+That's the current directory."#;
+
+        interceptor.push(content);
+        assert!(interceptor.has_pending_tool_calls());
+        assert!(interceptor.has_complete_block());
+
+        let (tools, before, after) = interceptor.extract_tool_calls();
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "bash");
+        assert_eq!(tools[0].parameters.get("command"), Some(&"pwd".to_string()));
+        assert!(before.contains("I'll check the directory"));
+        assert!(after.contains("That's the current directory"));
+    }
+
+    #[test]
+    fn test_parse_shorthand_read() {
+        let mut interceptor = ToolInterceptor::new();
+
+        let content = r#"<read>/path/to/file.txt</read>"#;
+
+        interceptor.push(content);
+        assert!(interceptor.has_complete_block());
+
+        let (tools, _, _) = interceptor.extract_tool_calls();
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "read");
+        assert_eq!(tools[0].parameters.get("path"), Some(&"/path/to/file.txt".to_string()));
+    }
+
+    #[test]
+    fn test_parse_shorthand_glob() {
+        let mut interceptor = ToolInterceptor::new();
+
+        let content = r#"<glob>**/*.rs</glob>"#;
+
+        interceptor.push(content);
+        assert!(interceptor.has_complete_block());
+
+        let (tools, _, _) = interceptor.extract_tool_calls();
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "glob");
+        assert_eq!(tools[0].parameters.get("pattern"), Some(&"**/*.rs".to_string()));
     }
 }
